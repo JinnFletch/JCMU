@@ -1,0 +1,27 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net8.0</TargetFramework>
+		<LangVersion>12</LangVersion>
+		<RootNamespace>JinnDev.$(MSBuildProjectName.Replace(" ", "_"))</RootNamespace>
+		<AssemblyName>JinnDev.$(MSBuildProjectName.Replace(" ", "_"))</AssemblyName>
+		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Authors>JinnDev</Authors>
+		<Company>Jinn Studios</Company>
+		<Product>Jinn Context Menu Utility Addon Manager</Product>
+		<Nullable>enable</Nullable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\JCMU.AddonManager\JCMU.AddonManager.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.0" />
+		<PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.0" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.0" />
+	</ItemGroup>
+
+</Project>

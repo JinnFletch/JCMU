@@ -3,4 +3,5 @@
     <File Path="readme.md" />
   </Folder>
   <Project Path="JCMU.AddonManager/JCMU.AddonManager.csproj" />
+  <Project Path="JCMU.ConsoleBed/JCMU.ConsoleBed.csproj" Id="794e6201-caeb-4816-8930-c04a40a15405" />
 </Solution>
