@@ -8,6 +8,7 @@ using JinnDev.JCMU.ConsoleBed.Cli;
 using JinnDev.JCMU.ConsoleBed.Execution;
 using JinnDev.JCMU.ConsoleBed.Registry;
 using JinnDev.JCMU.ConsoleBed.Runtime;
+using JinnDev.Utilities.CommandLine;
 using JinnDev.Utilities.Monad;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -21,17 +22,18 @@ public class Program
     // Caches to hold numbered list outputs
     private static Dictionary<int, AddonSearchResult>? _lastSearchResults;
     private static IReadOnlyList<string>? _lastListResults;
+    private static ServiceProvider _serviceProvider = null!;
 
     public static async Task<int> Main(string[] args)
     {
         var services = new ServiceCollection();
         ConfigureServices(services);
-        var provider = services.BuildServiceProvider();
-        await using var _ = provider.ConfigureAwait(false);
+        _serviceProvider = services.BuildServiceProvider();
+        await using var _ = _serviceProvider.ConfigureAwait(false);
 
-        var storeDispatcher = provider.GetRequiredService<StoreCliDispatcher>();
-        var executionDispatcher = provider.GetRequiredService<ExecutionCliDispatcher>();
-        var coreRegistrar = provider.GetRequiredService<CoreRegistrar>();
+        var storeDispatcher = _serviceProvider.GetRequiredService<StoreCliDispatcher>();
+        var executionDispatcher = _serviceProvider.GetRequiredService<ExecutionCliDispatcher>();
+        var coreRegistrar = _serviceProvider.GetRequiredService<CoreRegistrar>();
 
         // 1. Detect if we are entering the UI/Interactive mode
         bool interactiveMode = args.Length > 0 && args[0].Equals("-i", StringComparison.OrdinalIgnoreCase);
@@ -113,6 +115,7 @@ public class Program
             "teardown" => Task.FromResult(TeardownPlatform(coreRegistrar)),
             "trust" => storeDispatcher.HandleTrustAsync(args),
             "untrust" => storeDispatcher.HandleUntrustAsync(args),
+            "dev" => RouteDevCommandAsync(args),
             _ => Task.FromResult(Maybe.Fail($"Unknown command: {verb}"))
         };
 
@@ -126,6 +129,22 @@ public class Program
         }
 
         return result;
+    }
+
+    private static Task<Maybe> RouteDevCommandAsync(string[] args)
+    {
+        // We resolve it here to avoid passing too many dependencies into the primary RouteCommandAsync
+        var devDispatcher = _serviceProvider.GetRequiredService<DevCliDispatcher>();
+
+        if (args.Length < 2)
+            return Task.FromResult(Maybe.Fail("Usage: jcmu dev link [path] OR jcmu dev unlink <AddonId>"));
+
+        return args[1].ToLowerInvariant() switch
+        {
+            "link" => devDispatcher.HandleLinkAsync(args),
+            "unlink" => devDispatcher.HandleUnlinkAsync(args),
+            _ => Task.FromResult(Maybe.Fail($"Unknown dev command: {args[1]}"))
+        };
     }
 
     private static Maybe InitializePlatform(CoreRegistrar registrar)
@@ -182,6 +201,9 @@ public class Program
         services.AddSingleton<IPluginInvoker>(x => new PluginInvoker(x.GetRequiredService<IPluginLoader>(), x.GetRequiredService<ILoggerFactory>()));
         services.AddTransient<StoreCliDispatcher>(x => new StoreCliDispatcher(x.GetRequiredService<IAddonInstaller>(), x.GetRequiredService<IAddonSource>(), x.GetRequiredService<IRegistryManager>(), x.GetRequiredService<ITrustManager>(), x.GetRequiredService<ILogger<StoreCliDispatcher>>()));
         services.AddTransient<ExecutionCliDispatcher>(x => new ExecutionCliDispatcher(x.GetRequiredService<IPluginInvoker>(), x.GetRequiredService<ILogger<ExecutionCliDispatcher>>()));
+
+        services.AddStatelessCommandLineRunner();
+        services.AddTransient<DevCliDispatcher>(x => new DevCliDispatcher(x.GetRequiredService<IRegistryManager>(), x.GetRequiredService<IStatelessRunner>(), x.GetRequiredService<ILogger<DevCliDispatcher>>()));
     }
 
     private static void PrintHelp()
@@ -197,6 +219,8 @@ public class Program
         Console.WriteLine("  uninstall <Id | Number>       Remove an addon (e.g., 'uninstall 1' after list).");
         Console.WriteLine("  trust <Author>                Allow installation of an author's addons.");
         Console.WriteLine("  untrust <Author>              Revoke installation trust for an author.");
+        Console.WriteLine("  dev link [path]               Path to a local csproj to test addon development.");
+        Console.WriteLine("  dev unlink <AddonId>          The AddonId to unlink once development is over.");
 
         Console.WriteLine("\nSystem Configuration:");
         Console.WriteLine("  init                          Registers the 'JinnCM' root menu in Windows.");

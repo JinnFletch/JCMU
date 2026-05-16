@@ -45,7 +45,7 @@ public class ExecutionCliDispatcher
 
         var addonId = args[1];
 
-        // [NEW LOGIC] Parse the optional background flag and adjust the target path index
+        // Parse the optional background flag and adjust the target path index
         bool runInBackground = args[2].Equals("-b", StringComparison.OrdinalIgnoreCase);
         var targetDirectory = runInBackground ? args[3] : args[2];
 

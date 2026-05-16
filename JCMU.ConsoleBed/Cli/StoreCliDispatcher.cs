@@ -175,23 +175,42 @@ public class StoreCliDispatcher
                 if (addonDir == null) continue;
 
                 var relativeId = Path.GetRelativePath(pluginsBase, addonDir).Replace('\\', '/');
-                results.Add(relativeId); // Maintain the cache for the uninstall command
+                results.Add(relativeId);
 
-                // Deserialize to grab the URL
                 var json = File.ReadAllText(manifestPath);
                 var manifest = System.Text.Json.JsonSerializer.Deserialize<PluginManifest>(json);
 
-                Console.WriteLine($"[{results.Count}] {relativeId}");
-
-                if (manifest != null && !string.IsNullOrWhiteSpace(manifest.RepositoryUrl))
+                // --- NEW SYMLINK DETECTION ---
+                var dirInfo = new DirectoryInfo(addonDir);
+                if (dirInfo.LinkTarget != null) // .NET 6+ detects Junctions and Symlinks natively!
                 {
-                    Console.WriteLine($"    {manifest.RepositoryUrl}");
+                    bool isBroken = !Directory.Exists(dirInfo.LinkTarget);
+
+                    Console.Write($"[{results.Count}] {relativeId} ");
+
+                    if (isBroken)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine("[BROKEN DEV-LINK]");
+                        Console.ResetColor();
+                        Console.WriteLine($"    Target: {dirInfo.LinkTarget} (Directory not found)");
+                    }
+                    else
+                    {
+                        Console.ForegroundColor = ConsoleColor.Cyan;
+                        Console.WriteLine("[DEV-LINK]");
+                        Console.ResetColor();
+                        Console.WriteLine($"    Target: {dirInfo.LinkTarget}");
+                    }
                 }
                 else
                 {
-                    Console.ForegroundColor = ConsoleColor.DarkGray;
-                    Console.WriteLine("    (No repository URL provided in manifest)");
-                    Console.ResetColor();
+                    // Standard Output for normal installs
+                    Console.WriteLine($"[{results.Count}] {relativeId}");
+                    if (manifest != null && !string.IsNullOrWhiteSpace(manifest.RepositoryUrl))
+                        Console.WriteLine($"    {manifest.RepositoryUrl}");
+                    else
+                        Console.WriteLine("    (No repository URL provided in manifest)");
                 }
 
                 Console.WriteLine(); // Blank line for spacing
