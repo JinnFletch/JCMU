@@ -32,11 +32,10 @@ public class CoreRegistrar
         {
             _logger.LogInformation("Initializing JCMU Core Registry Anchors...");
 
-            // Resolve the absolute path to the icon file sitting next to the EXE
             var exeDirectory = Path.GetDirectoryName(Environment.ProcessPath) ?? "";
+            var coreExePath = Environment.ProcessPath ?? throw new Exception("Cannot determine process path.");
             var iconPath = Path.Combine(exeDirectory, "Icons", "jinn.ico");
 
-            // Fallback to a default Windows icon if the custom one is missing
             var finalIconValue = File.Exists(iconPath) ? iconPath : "shell32.dll,-16764";
 
             // 1. Create the primary UI Hooks in Explorer
@@ -45,13 +44,23 @@ public class CoreRegistrar
                 using var hookKey = WinReg.CurrentUser.CreateSubKey($@"{hookPath}\JCMU_Core");
                 hookKey.SetValue("MUIVerb", "JinnCM");
                 hookKey.SetValue("ExtendedSubCommandsKey", "JCMU_Menu");
-
-                // Set the Icon
                 hookKey.SetValue("Icon", finalIconValue);
             }
 
             // 2. Create the hidden backing store for the Root placement
-            using var _ = WinReg.CurrentUser.CreateSubKey(@"Software\Classes\JCMU_Menu\shell");
+            using var rootStore = WinReg.CurrentUser.CreateSubKey(@"Software\Classes\JCMU_Menu\shell");
+
+            // 3. Bake in the Permanent "Search for Addons" Menu Item
+            // Change "999_" to "z_" to ensure it sorts after "JCMU_Category_..."
+            using var searchItemKey = rootStore.CreateSubKey("z_SearchAddons");
+            searchItemKey.SetValue("MUIVerb", "Search for Addons...");
+            searchItemKey.SetValue("Icon", "imageres.dll,-177");
+
+            // This flag 0x20 is what creates that Horizontal Rule (Separator)
+            searchItemKey.SetValue("CommandFlags", 0x20, Microsoft.Win32.RegistryValueKind.DWord);
+
+            using var searchCmdKey = searchItemKey.CreateSubKey("command");
+            searchCmdKey.SetValue("", $"\"{coreExePath}\" -i search");
 
             _logger.LogInformation("Core registry initialization successful.");
         });

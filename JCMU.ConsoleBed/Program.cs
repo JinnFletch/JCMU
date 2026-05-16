@@ -33,13 +33,35 @@ public class Program
         var executionDispatcher = provider.GetRequiredService<ExecutionCliDispatcher>();
         var coreRegistrar = provider.GetRequiredService<CoreRegistrar>();
 
-        if (args.Length > 0)
+        // 1. Detect if we are entering the UI/Interactive mode
+        bool interactiveMode = args.Length > 0 && args[0].Equals("-i", StringComparison.OrdinalIgnoreCase);
+        bool isManualLaunch = args.Length == 0;
+
+        // 2. Always print help at the very top if a UI is being shown
+        if (interactiveMode || isManualLaunch)
         {
-            var result = await RouteCommandAsync(args, storeDispatcher, executionDispatcher, coreRegistrar).ConfigureAwait(false);
-            return result.HasValue ? 0 : 1;
+            PrintHelp();
         }
 
-        PrintHelp();
+        string[] commandArgs = args;
+        if (interactiveMode)
+        {
+            commandArgs = args.Skip(1).ToArray(); // Strip -i for the router
+        }
+
+        // 3. Execute initial command if provided
+        if (commandArgs.Length > 0)
+        {
+            var result = await RouteCommandAsync(commandArgs, storeDispatcher, executionDispatcher, coreRegistrar).ConfigureAwait(false);
+
+            // Exit immediately if this wasn't an interactive session (e.g. Shell Execute)
+            if (!interactiveMode)
+            {
+                return result.HasValue ? 0 : 1;
+            }
+        }
+
+        // 4. REPL Loop
         while (true)
         {
             Console.WriteLine();
