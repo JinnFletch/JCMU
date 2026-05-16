@@ -100,8 +100,6 @@ public class CoreRegistrar
                     classesKey.DeleteSubKeyTree(key, throwOnMissingSubKey: false);
                 }
             }
-
-            _logger.LogInformation("Core registry teardown successful.");
         });
     }
 }
