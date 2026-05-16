@@ -9,13 +9,13 @@ namespace JinnDev.JCMU.ConsoleBed.Execution;
 /// <summary>
 /// Orchestrates the lifecycle of an Addon execution: Loading, Executing, and Unloading.
 /// </summary>
-public class PluginInvoker
+public class PluginInvoker : IPluginInvoker
 {
-    private readonly PluginLoader _loader;
+    private readonly IPluginLoader _loader;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<PluginInvoker> _logger;
 
-    public PluginInvoker(PluginLoader loader, ILoggerFactory loggerFactory)
+    public PluginInvoker(IPluginLoader loader, ILoggerFactory loggerFactory)
     {
         _loader = loader;
         _loggerFactory = loggerFactory;

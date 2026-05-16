@@ -15,7 +15,7 @@ public record LoadedPlugin(IJcmuAddon AddonInstance, PluginLoadContext Context);
 /// Responsible for dynamically loading compiled JCMU Addons into isolated memory spaces
 /// and instantiating their primary logic classes.
 /// </summary>
-public class PluginLoader
+public class PluginLoader : IPluginLoader
 {
     private readonly ILogger<PluginLoader> _logger;
 

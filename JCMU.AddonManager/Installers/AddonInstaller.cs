@@ -20,7 +20,7 @@ public class AddonInstaller : IAddonInstaller
         _logger = logger;
     }
 
-    public async Task<Maybe> InstallAsync(IAddonSource source, string addonId, string? version = null)
+    public async Task<Maybe<string>> InstallAsync(IAddonSource source, string addonId, string? version = null)
     {
         _logger.LogInformation("Beginning installation pipeline for '{AddonId}'...", addonId);
 
@@ -45,7 +45,8 @@ public class AddonInstaller : IAddonInstaller
                 noneActionAsync: async none => _logger.LogError(none.Exception, "Installation failed: {Message}", none.Message)
             )
 
-            .BindAsync(_ => Maybe.SUCCESS)
+            // MAP the Context to the final directory string so the Core can use it
+            .MapAsync(ctx => ctx.FinalPluginDirectory)
             .ConfigureAwait(false);
     }
 

@@ -14,8 +14,8 @@ public interface IAddonInstaller
     /// <param name="source">The source provider to pull the code from.</param>
     /// <param name="addonId">The requested addon identifier.</param>
     /// <param name="version">The requested version (or "latest" if null).</param>
-    /// <returns>A parameterless monad representing the success or failure of the installation.</returns>
-    Task<Maybe> InstallAsync(IAddonSource source, string addonId, string? version = null);
+    /// <returns>A monad containing the absolute path to the installed plugin directory.</returns>
+    Task<Maybe<string>> InstallAsync(IAddonSource source, string addonId, string? version = null);
 
     /// <summary>
     /// Safely removes an installed addon from the local filesystem and unregisters its context menus.
