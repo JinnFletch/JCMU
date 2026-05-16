@@ -1,16 +1,21 @@
+#define AppName "Jinn Context Menu Utility (JCMU)"
+#define AppVersion GetFileVersion("JCMU.ConsoleBed\bin\Release\net8.0\win-x64\publish\jcmu.exe")
+
 [Setup]
-AppName=Jinn Context Menu Utility (JCMU)
-AppVersion=1.0.0
+AppId={{YOUR-GUID-HERE}}
+AppName={#AppName}
+AppVersion={#AppVersion}
+AppVerName={#AppName} {#AppVersion}
+DefaultDirName={commonpf}\JCMU
+VersionInfoVersion={#AppVersion}
 AppPublisher=Jinn Studios
-; Installs to the User's local AppData folder so they don't need Admin rights to install it
-DefaultDirName={localappdata}\Programs\JCMU
 DisableProgramGroupPage=yes
 OutputBaseFilename=JCMU_Installer
 Compression=lzma
 SolidCompression=yes
-; Tells Windows Explorer to refresh the PATH immediately so no reboot is required
 ChangesEnvironment=yes
-PrivilegesRequired=lowest
+; Changed to admin because we are writing to {commonpf}
+PrivilegesRequired=admin
 
 [Files]
 ; The main executable

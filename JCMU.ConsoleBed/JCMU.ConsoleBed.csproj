@@ -1,11 +1,14 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
+		<AssemblyName>jcmu</AssemblyName>
+		<Version>1.0.4</Version>
+		<AssemblyVersion>1.0.4</AssemblyVersion>
+		<FileVersion>1.0.4</FileVersion>
 		<OutputType>Exe</OutputType>
 		<TargetFramework>net8.0</TargetFramework>
 		<LangVersion>12</LangVersion>
 		<RootNamespace>JinnDev.$(MSBuildProjectName.Replace(" ", "_"))</RootNamespace>
-		<AssemblyName>jcmu</AssemblyName>
 		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Authors>JinnDev</Authors>
