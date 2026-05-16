@@ -84,25 +84,34 @@ public class PluginLoader : IPluginLoader
     /// </summary>
     private static IJcmuAddon InstantiateAddon(Assembly assembly, string addonId)
     {
-        // Find any public, non-abstract class that implements IJcmuAddon
-        var interfaceType = typeof(IJcmuAddon);
-        var addonType = assembly.GetTypes().FirstOrDefault(t =>
-            interfaceType.IsAssignableFrom(t) &&
-            t is { IsInterface: false, IsAbstract: false });
-
-        if (addonType == null)
+        try
         {
-            throw new Exception($"The loaded assembly for '{addonId}' does not contain any class implementing {nameof(IJcmuAddon)}.");
+            // Find any public, non-abstract class that implements IJcmuAddon
+            var interfaceType = typeof(IJcmuAddon);
+            var addonType = assembly.GetTypes().FirstOrDefault(t =>
+                interfaceType.IsAssignableFrom(t) &&
+                t is { IsInterface: false, IsAbstract: false });
+
+            if (addonType == null)
+            {
+                throw new Exception($"The loaded assembly for '{addonId}' does not contain any class implementing {nameof(IJcmuAddon)}.");
+            }
+
+            // Instantiate using the parameterless constructor
+            var instance = Activator.CreateInstance(addonType) as IJcmuAddon;
+
+            if (instance == null)
+            {
+                throw new Exception($"Failed to instantiate the class '{addonType.Name}' for addon '{addonId}'. Ensure it has a public, parameterless constructor.");
+            }
+
+            return instance;
         }
-
-        // Instantiate using the parameterless constructor
-        var instance = Activator.CreateInstance(addonType) as IJcmuAddon;
-
-        if (instance == null)
+        catch (ReflectionTypeLoadException ex)
         {
-            throw new Exception($"Failed to instantiate the class '{addonType.Name}' for addon '{addonId}'. Ensure it has a public, parameterless constructor.");
+            // This is the magic block that tells you the REAL error
+            var messages = string.Join("\n", ex.LoaderExceptions.Select(e => e?.Message));
+            throw new Exception($"Type Load Failure in {addonId}:\n{messages}", ex);
         }
-
-        return instance;
     }
 }

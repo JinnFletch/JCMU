@@ -103,8 +103,22 @@ internal static class FileSystemManager
             var tempBase = Path.GetDirectoryName(context.TempCloneDirectory);
             if (tempBase != null && Directory.Exists(tempBase))
             {
-                Directory.Delete(tempBase, true);
+                ForceDeleteDirectory(tempBase);
             }
         });
+    }
+
+    // Strips read-only attributes before deleting
+    private static void ForceDeleteDirectory(string targetDir)
+    {
+        var directory = new DirectoryInfo(targetDir);
+
+        // Remove ReadOnly attributes from all files and subdirectories
+        foreach (var info in directory.GetFileSystemInfos("*", SearchOption.AllDirectories))
+        {
+            info.Attributes &= ~FileAttributes.ReadOnly;
+        }
+
+        directory.Delete(true);
     }
 }

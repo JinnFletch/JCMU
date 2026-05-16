@@ -1,0 +1,33 @@
+name: Build JCMU Installer
+
+# This action runs automatically whenever you create a new Git Tag starting with 'v' (e.g., v1.0.0)
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET 8
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+
+    - name: Publish JCMU Core (Single File)
+      run: dotnet publish JCMU.ConsoleBed/JCMU.ConsoleBed.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+
+    - name: Compile Inno Setup Script
+      run: iscc JCMU_Installer.iss
+
+    - name: Upload Installer to Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: Output/JCMU_Installer.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

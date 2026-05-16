@@ -32,7 +32,18 @@ public class PluginLoadContext : AssemblyLoadContext
     /// </summary>
     protected override Assembly? Load(AssemblyName assemblyName)
     {
-        // First, check if the requested assembly exists in the addon's specific folder.
+        // Check if the Core (Default context) already has this assembly loaded.
+        // This effectively "Auto-shares" the SDK, Monads, and even standard 
+        // Microsoft extensions like Logging or DI if the Core is using them.
+        var alreadyLoaded = AssemblyLoadContext.Default.Assemblies
+            .FirstOrDefault(a => a.GetName().Name == assemblyName.Name);
+
+        if (alreadyLoaded != null)
+        {
+            return null; // Defer to the Core's version
+        }
+
+        // Check if the requested assembly exists in the addon's specific folder.
         string? assemblyPath = _resolver.ResolveAssemblyToPath(assemblyName);
 
         if (assemblyPath != null)
