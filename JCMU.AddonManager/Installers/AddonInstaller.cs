@@ -1,5 +1,6 @@
 ﻿using JinnDev.JCMU.AddonManager.Interfaces;
 using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.JCMU.AddonManager.Security;
 using JinnDev.JCMU.AddonManager.Utilities;
 using JinnDev.Utilities.Monad;
 using Microsoft.Extensions.Logging;
@@ -12,11 +13,13 @@ namespace JinnDev.JCMU.AddonManager.Installers;
 public class AddonInstaller : IAddonInstaller
 {
     private readonly IAddonBuilder _builder;
+    private readonly ITrustManager _trustManager;
     private readonly ILogger<AddonInstaller> _logger;
 
-    public AddonInstaller(IAddonBuilder builder, ILogger<AddonInstaller> logger)
+    public AddonInstaller(IAddonBuilder builder, ITrustManager trustManager, ILogger<AddonInstaller> logger)
     {
         _builder = builder;
+        _trustManager = trustManager;
         _logger = logger;
     }
 
@@ -85,13 +88,20 @@ public class AddonInstaller : IAddonInstaller
     /// <summary>
     /// Reaches out to the source to find the repository URL and resolve the correct version tag.
     /// </summary>
-    private static async Task<Maybe<InstallContext>> DetermineInstallContextAsync(IAddonSource source, string addonId, string? targetVersion)
+    private async Task<Maybe<InstallContext>> DetermineInstallContextAsync(IAddonSource source, string addonId, string? targetVersion)
     {
         return await source.SearchAsync(addonId)
             .BindAsync(results =>
             {
                 var match = results.Items.FirstOrDefault(r => r.AddonId.Equals(addonId, StringComparison.OrdinalIgnoreCase));
                 if (match == null) return Maybe.None<AddonSearchResult>($"Could not find an addon matching ID: {addonId}");
+
+                // SECURITY ENFORCEMENT
+                if (!_trustManager.IsTrusted(match.Author))
+                {
+                    return Maybe.None<AddonSearchResult>($"Installation blocked: Author '{match.Author}' is not trusted.\nRun 'jcmu trust {match.Author}' to allow installation.");
+                }
+
                 return Maybe.Some(match);
             })
             .BindAsync(match => source.GetVersionsAsync(match.RepositoryUrl)

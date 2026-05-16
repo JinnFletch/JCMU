@@ -1,12 +1,11 @@
 ﻿using JinnDev.JCMU.AddonManager.Interfaces;
 using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.JCMU.AddonManager.Security;
 using JinnDev.JCMU.ConsoleBed.Registry;
-using JinnDev.JCMU.ConsoleBed.Runtime;
 using JinnDev.JCMU.SDK.Models;
 using JinnDev.Utilities.Monad;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
-using System.Runtime.CompilerServices;
 
 namespace JinnDev.JCMU.ConsoleBed.Cli;
 
@@ -14,22 +13,38 @@ public class StoreCliDispatcher
 {
     private readonly IAddonInstaller _installer;
     private readonly IAddonSource _source;
-    private readonly IPluginLoader _loader;
     private readonly IRegistryManager _registryManager;
+    private readonly ITrustManager _trustManager;
     private readonly ILogger<StoreCliDispatcher> _logger;
 
     public StoreCliDispatcher(
         IAddonInstaller installer,
         IAddonSource source,
-        IPluginLoader loader,
         IRegistryManager registryManager,
+        ITrustManager trustManager,
         ILogger<StoreCliDispatcher> logger)
     {
         _installer = installer;
         _source = source;
-        _loader = loader;
         _registryManager = registryManager;
+        _trustManager = trustManager;
         _logger = logger;
+    }
+
+    public Task<Maybe> HandleTrustAsync(string[] args)
+    {
+        if (args.Length < 2) return Task.FromResult(Maybe.Fail("Usage: jcmu trust <Author>"));
+        var result = _trustManager.Trust(args[1]);
+        if (result.HasValue) Console.WriteLine($"\n[SUCCESS] '{args[1]}' has been added to trusted publishers.");
+        return Task.FromResult(result);
+    }
+
+    public Task<Maybe> HandleUntrustAsync(string[] args)
+    {
+        if (args.Length < 2) return Task.FromResult(Maybe.Fail("Usage: jcmu untrust <Author>"));
+        var result = _trustManager.Untrust(args[1]);
+        if (result.HasValue) Console.WriteLine($"\n[SUCCESS] '{args[1]}' has been removed from trusted publishers.");
+        return Task.FromResult(result);
     }
 
     public async Task<Maybe> HandleInstallAsync(string[] args, Dictionary<int, AddonSearchResult>? searchCache)
@@ -43,11 +58,9 @@ public class StoreCliDispatcher
         {
             if (searchCache == null || searchCache.Count == 0)
                 return Maybe.Fail("Numeric installation only works immediately after running a 'search'.");
-
-            if (!searchCache.ContainsKey(index))
+            if (!searchCache.TryGetValue(index, out AddonSearchResult? value))
                 return Maybe.Fail($"Invalid index '{index}'. The last search did not display that number.");
-
-            addonId = searchCache[index].AddonId;
+            addonId = value.AddonId;
         }
 
         var version = args.Length > 2 ? args[2] : null;
@@ -57,17 +70,18 @@ public class StoreCliDispatcher
         var result = await _installer.InstallAsync(_source, addonId, version)
             .BindAsync(async finalDirectory =>
             {
-                Maybe<MenuDefinition> menuExtraction = GetMenuDefinitionIsolated(addonId);
-
                 var coreExePath = Process.GetCurrentProcess().MainModule?.FileName
                                   ?? throw new Exception("Could not determine the executing Core EXE path.");
 
-                return menuExtraction.Bind(menuDef =>
-                    _registryManager.RegisterAddon(addonId, menuDef, coreExePath)
-                );
-            }).ConfigureAwait(false);
+                // Read directly from manifest.json, completely bypassing DLL file locks
+                var manifestPath = Path.Combine(finalDirectory, "manifest.json");
+                var options = new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                var json = await File.ReadAllTextAsync(manifestPath).ConfigureAwait(false);
+                var manifest = System.Text.Json.JsonSerializer.Deserialize<PluginManifest>(json, options)
+                               ?? throw new Exception("Failed to parse manifest.json during registration.");
 
-        RunGarbageCollection();
+                return _registryManager.RegisterAddon(addonId, manifest.Menu, coreExePath);
+            }).ConfigureAwait(false);
 
         if (result.HasValue)
         {
@@ -79,7 +93,6 @@ public class StoreCliDispatcher
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine($"\n[FAILED] '{addonId}' failed during installation or registration:");
             Console.WriteLine($"-> {result.Message}");
-            if (result.IsExceptionState) Console.WriteLine($"   {result.Exception!.Message}");
         }
 
         Console.ResetColor();
@@ -105,8 +118,6 @@ public class StoreCliDispatcher
         }
 
         Console.WriteLine($"\n--- Uninstalling Addon: {addonId} ---");
-
-        RunGarbageCollection();
 
         var uninstallResult = await _installer.UninstallAsync(addonId).ConfigureAwait(false);
         var registryResult = _registryManager.UnregisterAddon(addonId);
@@ -217,15 +228,30 @@ public class StoreCliDispatcher
                 return;
             }
 
-            // Calculate offset (e.g. Page 2 starts at 11)
             int startIndex = (page - 1) * 10 + 1;
 
             for (int i = 0; i < list.Count; i++)
             {
                 var displayNum = startIndex + i;
-                cache[displayNum] = list[i]; // Store in dict using the exact display number
+                cache[displayNum] = list[i];
 
-                Console.WriteLine($"[{displayNum}] {list[i].AddonId}");
+                bool isTrusted = _trustManager.IsTrusted(list[i].Author);
+
+                Console.Write($"[{displayNum}] {list[i].AddonId} ");
+
+                // Print Trust Tag
+                if (isTrusted)
+                {
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("[TRUSTED]");
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.DarkYellow;
+                    Console.WriteLine("[UNTRUSTED]");
+                }
+                Console.ResetColor();
+
                 if (!string.IsNullOrEmpty(list[i].Description))
                     Console.WriteLine($"    {list[i].Description}");
             }
@@ -242,31 +268,5 @@ public class StoreCliDispatcher
                 Console.ResetColor();
             }
         }).Bind(x => Maybe.SUCCESS);
-    }
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private Maybe<MenuDefinition> GetMenuDefinitionIsolated(string addonId)
-    {
-        return _loader.LoadPlugin(addonId)
-            .Bind(loadedPlugin =>
-            {
-                try
-                {
-                    return loadedPlugin.AddonInstance.GetMenuRegistration();
-                }
-                finally
-                {
-                    loadedPlugin.Context.Unload();
-                }
-            });
-    }
-
-    private void RunGarbageCollection()
-    {
-        for (int i = 0; i < 2; i++)
-        {
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-        }
     }
 }

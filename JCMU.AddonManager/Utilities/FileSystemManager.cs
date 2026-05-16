@@ -64,8 +64,10 @@ internal static class FileSystemManager
             if (!File.Exists(manifestPath))
                 throw new FileNotFoundException("The compiled output is missing a 'manifest.json' file. This is not a valid JCMU Addon.");
 
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+
             var json = await File.ReadAllTextAsync(manifestPath).ConfigureAwait(false);
-            var manifest = JsonSerializer.Deserialize<PluginManifest>(json)
+            var manifest = JsonSerializer.Deserialize<PluginManifest>(json, options)
                            ?? throw new Exception("Failed to deserialize manifest.json.");
 
             var validation = manifest.Validate();

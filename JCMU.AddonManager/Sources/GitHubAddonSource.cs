@@ -100,8 +100,7 @@ public class GitHubAddonSource : IAddonSource
                 throw new ArgumentException("Target temp path cannot be empty.");
 
             // Use shallow clone (--depth 1) to grab only the specific tag/branch without full commit history
-            var arguments = $"clone --branch {version} --depth 1 {repositoryUrl} \"{targetTempPath}\"";
-
+            var arguments = new[] { "clone", "--branch", version, "--depth", "1", repositoryUrl, targetTempPath };
             var cloneResult = await CliRunner.RunAsync("git", arguments).ConfigureAwait(false);
 
             // If the CliRunner monad failed, we throw to let the outer TryAsync catch and propagate it

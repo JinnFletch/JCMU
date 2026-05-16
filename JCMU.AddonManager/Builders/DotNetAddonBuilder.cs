@@ -17,7 +17,7 @@ public class DotNetAddonBuilder : IAddonBuilder
         return await LocateProjectFile(sourceDirectory)
             .BindAsync(csProjFile =>
             {
-                var arguments = $"publish \"{csProjFile}\" -c Release -o \"{publishDirectory}\"";
+                var arguments = new[] { "publish", csProjFile, "-c", "Release", "-o", publishDirectory };
                 return CliRunner.RunAsync("dotnet", arguments);
             })
             .BindAsync(cliOutput => VerifyPublishDirectory(publishDirectory))

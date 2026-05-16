@@ -2,6 +2,7 @@
 using JinnDev.JCMU.AddonManager.Installers;
 using JinnDev.JCMU.AddonManager.Interfaces;
 using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.JCMU.AddonManager.Security;
 using JinnDev.JCMU.AddonManager.Sources;
 using JinnDev.JCMU.ConsoleBed.Cli;
 using JinnDev.JCMU.ConsoleBed.Execution;
@@ -68,9 +69,6 @@ public class Program
         ExecutionCliDispatcher executionDispatcher,
         CoreRegistrar coreRegistrar)
     {
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-
         var verb = args[0].ToLowerInvariant();
 
         // 1. Capture the memory state for this specific execution turn
@@ -91,6 +89,8 @@ public class Program
             "execute" => executionDispatcher.HandleExecuteAsync(args),
             "init" => Task.FromResult(InitializePlatform(coreRegistrar)),
             "teardown" => Task.FromResult(TeardownPlatform(coreRegistrar)),
+            "trust" => storeDispatcher.HandleTrustAsync(args),
+            "untrust" => storeDispatcher.HandleUntrustAsync(args),
             _ => Task.FromResult(Maybe.Fail($"Unknown command: {verb}"))
         };
 
@@ -150,14 +150,15 @@ public class Program
             builder.SetMinimumLevel(LogLevel.Information);
         });
 
+        services.AddSingleton<ITrustManager>(x => new TrustManager());
         services.AddTransient<IAddonSource>(x => new GitHubAddonSource());
         services.AddTransient<IAddonBuilder>(x => new DotNetAddonBuilder());
-        services.AddTransient<IAddonInstaller>(x => new AddonInstaller(x.GetRequiredService<IAddonBuilder>(), x.GetRequiredService<ILogger<AddonInstaller>>()));
+        services.AddTransient<IAddonInstaller>(x => new AddonInstaller(x.GetRequiredService<IAddonBuilder>(), x.GetRequiredService<ITrustManager>(), x.GetRequiredService<ILogger<AddonInstaller>>()));
         services.AddTransient<IRegistryManager>(x => new RegistryManager(x.GetRequiredService<ILogger<RegistryManager>>()));
         services.AddTransient<CoreRegistrar>(x => new CoreRegistrar(x.GetRequiredService<ILogger<CoreRegistrar>>()));
         services.AddSingleton<IPluginLoader>(x => new PluginLoader(x.GetRequiredService<ILogger<PluginLoader>>()));
         services.AddSingleton<IPluginInvoker>(x => new PluginInvoker(x.GetRequiredService<IPluginLoader>(), x.GetRequiredService<ILoggerFactory>()));
-        services.AddTransient<StoreCliDispatcher>(x => new StoreCliDispatcher(x.GetRequiredService<IAddonInstaller>(), x.GetRequiredService<IAddonSource>(), x.GetRequiredService<IPluginLoader>(), x.GetRequiredService<IRegistryManager>(), x.GetRequiredService<ILogger<StoreCliDispatcher>>()));
+        services.AddTransient<StoreCliDispatcher>(x => new StoreCliDispatcher(x.GetRequiredService<IAddonInstaller>(), x.GetRequiredService<IAddonSource>(), x.GetRequiredService<IRegistryManager>(), x.GetRequiredService<ITrustManager>(), x.GetRequiredService<ILogger<StoreCliDispatcher>>()));
         services.AddTransient<ExecutionCliDispatcher>(x => new ExecutionCliDispatcher(x.GetRequiredService<IPluginInvoker>(), x.GetRequiredService<ILogger<ExecutionCliDispatcher>>()));
     }
 
@@ -172,6 +173,8 @@ public class Program
         Console.WriteLine("  list                          Show all currently installed addons.");
         Console.WriteLine("  install <Id | Number>         Install an addon (e.g., 'install 1' after search).");
         Console.WriteLine("  uninstall <Id | Number>       Remove an addon (e.g., 'uninstall 1' after list).");
+        Console.WriteLine("  trust <Author>                Allow installation of an author's addons.");
+        Console.WriteLine("  untrust <Author>              Revoke installation trust for an author.");
 
         Console.WriteLine("\nSystem Configuration:");
         Console.WriteLine("  init                          Registers the 'JinnCM' root menu in Windows.");

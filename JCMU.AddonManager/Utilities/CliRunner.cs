@@ -17,20 +17,24 @@ internal static class CliRunner
     /// <param name="arguments">The arguments to pass to the executable.</param>
     /// <param name="workingDirectory">The directory to execute the command in.</param>
     /// <returns>A monad containing the standard output on success, or the error output on failure.</returns>
-    public static async Task<Maybe<string>> RunAsync(string fileName, string arguments, string workingDirectory = "")
+    public static async Task<Maybe<string>> RunAsync(string fileName, IEnumerable<string> arguments, string workingDirectory = "")
     {
         return await Maybe.TryAsync<string>(async () =>
         {
             var processInfo = new ProcessStartInfo
             {
                 FileName = fileName,
-                Arguments = arguments,
                 WorkingDirectory = workingDirectory,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+
+            foreach (var arg in arguments)
+            {
+                processInfo.ArgumentList.Add(arg);
+            }
 
             using var process = new Process();
             process.StartInfo = processInfo;
