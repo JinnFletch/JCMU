@@ -90,7 +90,7 @@ public class AddonInstaller : IAddonInstaller
         return await source.SearchAsync(addonId)
             .BindAsync(results =>
             {
-                var match = results.FirstOrDefault(r => r.AddonId.Equals(addonId, StringComparison.OrdinalIgnoreCase));
+                var match = results.Items.FirstOrDefault(r => r.AddonId.Equals(addonId, StringComparison.OrdinalIgnoreCase));
                 if (match == null) return Maybe.None<AddonSearchResult>($"Could not find an addon matching ID: {addonId}");
                 return Maybe.Some(match);
             })

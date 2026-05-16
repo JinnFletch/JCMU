@@ -35,3 +35,8 @@ begin
   end;
   Result := Pos(';' + Param + ';', ';' + OrigPath + ';') = 0;
 end;
+
+[Run]
+; Executes 'jcmu init' automatically at the end of the installation.
+; Flags: runhidden ensures the user doesn't see a black console window flash.
+Filename: "{app}\jcmu.exe"; Parameters: "init"; StatusMsg: "Initializing JCMU Core Registry Anchors..."; Flags: runhidden

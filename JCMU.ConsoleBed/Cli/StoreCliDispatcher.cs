@@ -10,9 +10,6 @@ using System.Runtime.CompilerServices;
 
 namespace JinnDev.JCMU.ConsoleBed.Cli;
 
-/// <summary>
-/// Handles user-facing CLI commands related to Addon package management and menu registration.
-/// </summary>
 public class StoreCliDispatcher
 {
     private readonly IAddonInstaller _installer;
@@ -35,24 +32,22 @@ public class StoreCliDispatcher
         _logger = logger;
     }
 
-    /// <summary>
-    /// Executes the installation pipeline, extracts the Menu Definition, and registers it.
-    /// Expected format: `jcmu install JCMU.CleanVSBS [optionalVersion]`
-    /// </summary>
-    public async Task<Maybe> HandleInstallAsync(string[] args, IReadOnlyList<AddonSearchResult> searchCache)
+    public async Task<Maybe> HandleInstallAsync(string[] args, Dictionary<int, AddonSearchResult>? searchCache)
     {
         if (args.Length < 2) return Maybe.Fail("Usage: jcmu install <AddonId|Number>");
 
         var input = args[1];
         var addonId = input;
 
-        // Check if user provided a number from the last search
         if (int.TryParse(input, out var index))
         {
-            if (searchCache == null || index < 1 || index > searchCache.Count)
-                return Maybe.Fail($"Invalid index '{index}'. Please run 'search' first.");
+            if (searchCache == null || searchCache.Count == 0)
+                return Maybe.Fail("Numeric installation only works immediately after running a 'search'.");
 
-            addonId = searchCache[index - 1].AddonId;
+            if (!searchCache.ContainsKey(index))
+                return Maybe.Fail($"Invalid index '{index}'. The last search did not display that number.");
+
+            addonId = searchCache[index].AddonId;
         }
 
         var version = args.Length > 2 ? args[2] : null;
@@ -64,17 +59,14 @@ public class StoreCliDispatcher
             {
                 Maybe<MenuDefinition> menuExtraction = GetMenuDefinitionIsolated(addonId);
 
-                // Get the absolute path to this currently running jcmu.exe
                 var coreExePath = Process.GetCurrentProcess().MainModule?.FileName
                                   ?? throw new Exception("Could not determine the executing Core EXE path.");
 
-                // Map the MenuDefinition to the Registry
                 return menuExtraction.Bind(menuDef =>
                     _registryManager.RegisterAddon(addonId, menuDef, coreExePath)
                 );
             }).ConfigureAwait(false);
 
-        // Kick the GC after install just to be clean
         RunGarbageCollection();
 
         if (result.HasValue)
@@ -94,29 +86,31 @@ public class StoreCliDispatcher
         return result;
     }
 
-    /// <summary>
-    /// Removes an installed addon from the system and cleans up its registry keys.
-    /// Expected format: `jcmu uninstall JCMU.CleanVSBS`
-    /// </summary>
-    public async Task<Maybe> HandleUninstallAsync(string[] args)
+    public async Task<Maybe> HandleUninstallAsync(string[] args, IReadOnlyList<string>? listCache)
     {
-        if (args.Length < 2)
-            return Maybe.Fail("Usage: jcmu uninstall <AddonId>");
+        if (args.Length < 2) return Maybe.Fail("Usage: jcmu uninstall <AddonId|Number>");
 
-        var addonId = args[1];
+        var input = args[1];
+        var addonId = input;
+
+        if (int.TryParse(input, out var index))
+        {
+            if (listCache == null || listCache.Count == 0)
+                return Maybe.Fail("Numeric uninstallation only works immediately after running a 'list'.");
+
+            if (index < 1 || index > listCache.Count)
+                return Maybe.Fail($"Invalid index '{index}'. The last list only had {listCache.Count} results.");
+
+            addonId = listCache[index - 1];
+        }
 
         Console.WriteLine($"\n--- Uninstalling Addon: {addonId} ---");
 
-        // Run the collector BEFORE we try to delete
         RunGarbageCollection();
 
-        // 1. Remove the physical files
         var uninstallResult = await _installer.UninstallAsync(addonId).ConfigureAwait(false);
-
-        // 2. Remove the registry keys (even if the files didn't exist, we still want to clean the registry)
         var registryResult = _registryManager.UnregisterAddon(addonId);
 
-        // Merge the states. If either failed, report the failure.
         var finalResult = uninstallResult.HasValue && registryResult.HasValue
             ? Maybe.SUCCESS
             : Maybe.Fail($"Uninstall: {uninstallResult.Message} | Registry: {registryResult.Message}");
@@ -137,11 +131,7 @@ public class StoreCliDispatcher
         return finalResult;
     }
 
-    /// <summary>
-    /// Lists all currently installed addons found in the ProgramData directory.
-    /// Expected format: `jcmu list`
-    /// </summary>
-    public static Task<Maybe> HandleListAsync()
+    public static Task<Maybe> HandleListAsync(Action<IReadOnlyList<string>> onResultsFound)
     {
         return Maybe.TryAsync(() =>
         {
@@ -154,6 +144,7 @@ public class StoreCliDispatcher
             if (!Directory.Exists(pluginsBase))
             {
                 Console.WriteLine("No addons currently installed.");
+                onResultsFound(Array.Empty<string>());
                 return Task.FromResult(Maybe.SUCCESS);
             }
 
@@ -162,60 +153,100 @@ public class StoreCliDispatcher
             if (manifests.Length == 0)
             {
                 Console.WriteLine("No addons currently installed.");
+                onResultsFound(Array.Empty<string>());
                 return Task.FromResult(Maybe.SUCCESS);
             }
 
+            var results = new List<string>();
             foreach (var manifestPath in manifests)
             {
                 var addonDir = Path.GetDirectoryName(manifestPath);
                 if (addonDir == null) continue;
 
-                // Get the ID by making the path relative to the Plugins folder
-                // e.g. "C:\...\Plugins\JinnFletch\GitInit" -> "JinnFletch\GitInit"
                 var relativeId = Path.GetRelativePath(pluginsBase, addonDir).Replace('\\', '/');
-                Console.WriteLine($"- {relativeId}");
+                results.Add(relativeId);
             }
 
+            for (int i = 0; i < results.Count; i++)
+            {
+                Console.WriteLine($"[{i + 1}] {results[i]}");
+            }
+
+            onResultsFound(results);
             Console.WriteLine();
             return Task.FromResult(Maybe.SUCCESS);
         });
     }
 
-    public async Task<Maybe> HandleSearchAsync(string[] args, Action<IReadOnlyList<AddonSearchResult>> onResultsFound)
+    public async Task<Maybe> HandleSearchAsync(string[] args, Action<Dictionary<int, AddonSearchResult>> onResultsFound)
     {
-        if (args.Length < 2) return Maybe.Fail("Usage: jcmu search <Keyword>");
-        var query = args[1];
+        string? query = null;
+        int page = 1;
 
-        Console.WriteLine($"\n--- Searching GitHub for '{query}' ---");
-
-        var result = await _source.SearchAsync(query).ConfigureAwait(false);
-
-        return result.Tap(list =>
+        // Parse logic: If the LAST argument is a number, treat it as the page.
+        if (args.Length > 1)
         {
+            if (int.TryParse(args.Last(), out var parsedPage))
+            {
+                page = parsedPage > 0 ? parsedPage : 1;
+                // Join everything else back together as the query
+                var queryParts = args.Skip(1).Take(args.Length - 2);
+                query = string.Join(" ", queryParts);
+            }
+            else
+            {
+                query = string.Join(" ", args.Skip(1));
+            }
+
+            if (string.IsNullOrWhiteSpace(query)) query = null;
+        }
+
+        Console.WriteLine($"\n--- Searching GitHub{(query != null ? $" for '{query}'" : "")} (Page {page}) ---");
+
+        var result = await _source.SearchAsync(query, page).ConfigureAwait(false);
+
+        return result.Tap(pagedResult =>
+        {
+            var list = pagedResult.Items;
+            var cache = new Dictionary<int, AddonSearchResult>();
+
             if (list.Count == 0)
             {
                 Console.WriteLine("No addons found matching that query.");
+                onResultsFound(cache);
                 return;
             }
 
-            onResultsFound(list); // Store in the cache
+            // Calculate offset (e.g. Page 2 starts at 11)
+            int startIndex = (page - 1) * 10 + 1;
 
             for (int i = 0; i < list.Count; i++)
             {
-                Console.WriteLine($"[{i + 1}] {list[i].AddonId}");
+                var displayNum = startIndex + i;
+                cache[displayNum] = list[i]; // Store in dict using the exact display number
+
+                Console.WriteLine($"[{displayNum}] {list[i].AddonId}");
                 if (!string.IsNullOrEmpty(list[i].Description))
                     Console.WriteLine($"    {list[i].Description}");
+            }
+
+            onResultsFound(cache);
+
+            // Display paging footer if total results exceed 10
+            if (pagedResult.TotalCount > 10)
+            {
+                int endItem = startIndex + list.Count - 1;
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"{startIndex}-{endItem} of {pagedResult.TotalCount} shown");
+                Console.ResetColor();
             }
         }).Bind(x => Maybe.SUCCESS);
     }
 
-
-
-    // This method is NOT async and is marked to prevent the JIT from "holding on" to the variables for debugging.
     [MethodImpl(MethodImplOptions.NoInlining)]
     private Maybe<MenuDefinition> GetMenuDefinitionIsolated(string addonId)
     {
-        // Temporarily spin up the DLL to get the Menu Definition
         return _loader.LoadPlugin(addonId)
             .Bind(loadedPlugin =>
             {
@@ -230,7 +261,6 @@ public class StoreCliDispatcher
             });
     }
 
-    // [NEW HELPER] The "Nuclear" GC Cleanup
     private void RunGarbageCollection()
     {
         for (int i = 0; i < 2; i++)

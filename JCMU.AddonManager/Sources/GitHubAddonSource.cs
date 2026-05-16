@@ -24,13 +24,16 @@ public class GitHubAddonSource : IAddonSource
         _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
     }
 
-    public async Task<Maybe<IReadOnlyList<AddonSearchResult>>> SearchAsync(string query)
+    public async Task<Maybe<AddonPagedResult>> SearchAsync(string? query, int page = 1)
     {
-        return await Maybe.TryAsync<IReadOnlyList<AddonSearchResult>>(async () =>
+        return await Maybe.TryAsync<AddonPagedResult>(async () =>
         {
+            // If query is null/empty, we just search the topic globally
             // Enforce searching only for repos tagged with our specific ecosystem topic
-            var encodedQuery = Uri.EscapeDataString($"{query} topic:jcmu-addon");
-            var requestUrl = $"{GitHubApiBase}/search/repositories?q={encodedQuery}&sort=stars&order=desc";
+            var searchTerm = string.IsNullOrWhiteSpace(query) ? "topic:jcmu-addon" : $"{query} topic:jcmu-addon";
+            var encodedQuery = Uri.EscapeDataString(searchTerm);
+
+            var requestUrl = $"{GitHubApiBase}/search/repositories?q={encodedQuery}&sort=stars&order=desc&per_page=10&page={page}";
 
             using var response = await _httpClient.GetAsync(requestUrl).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
@@ -48,7 +51,7 @@ public class GitHubAddonSource : IAddonSource
                 Tags = repo.Topics ?? []
             }).ToList();
 
-            return mappedResults;
+            return new AddonPagedResult(mappedResults, result.TotalCount);
         }).ConfigureAwait(false);
     }
 
@@ -111,7 +114,9 @@ public class GitHubAddonSource : IAddonSource
 
     #region Private DTOs for GitHub JSON Mapping
 
-    private record GitHubSearchResponse([property: JsonPropertyName("items")] List<GitHubRepoDto> Items);
+    private record GitHubSearchResponse(
+        [property: JsonPropertyName("total_count")] int TotalCount,
+        [property: JsonPropertyName("items")] List<GitHubRepoDto> Items);
 
     private record GitHubRepoDto(
         [property: JsonPropertyName("full_name")] string FullName,

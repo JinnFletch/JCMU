@@ -12,8 +12,9 @@ public interface IAddonSource
     /// Searches the remote source for addons matching the query.
     /// </summary>
     /// <param name="query">The search term provided by the user.</param>
+    /// <param name="page">In case of manu search results, which page number to find</param>
     /// <returns>A monad containing a list of search results, or a failure if the network/API call fails.</returns>
-    Task<Maybe<IReadOnlyList<AddonSearchResult>>> SearchAsync(string query);
+    Task<Maybe<AddonPagedResult>> SearchAsync(string? query, int page = 1);
 
     /// <summary>
     /// Retrieves all available versions (tags) for a specific addon repository.
