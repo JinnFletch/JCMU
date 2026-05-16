@@ -74,6 +74,22 @@ internal static class FileSystemManager
             if (!validation.HasValue)
                 throw new Exception($"Manifest validation failed: {validation.Message}");
 
+            var currentCoreVersion = typeof(FileSystemManager).Assembly.GetName().Version;
+
+            if (Version.TryParse(manifest.MinCoreVersion, out var minVersion))
+            {
+                if (currentCoreVersion < minVersion)
+                    throw new Exception($"This addon requires JCMU Core v{minVersion} or higher. Please update JCMU.");
+            }
+
+            // --- ANTI-SPOOFING STAMP ---
+            // Authoritative URL we got from the GitHub API in Phase 1.
+            var stampedManifest = manifest with { RepositoryUrl = ctx.RepositoryUrl };
+
+            var newJson = JsonSerializer.Serialize(stampedManifest, new JsonSerializerOptions { WriteIndented = true });
+            await File.WriteAllTextAsync(manifestPath, newJson).ConfigureAwait(false);
+            // ---------------------------
+
             return ctx;
         }).ConfigureAwait(false);
     }

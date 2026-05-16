@@ -1,4 +1,4 @@
-﻿using JinnDev.JCMU.SDK.Models;
+﻿using JinnDev.JCMU.AddonManager.Models;
 using JinnDev.Utilities.Monad;
 
 namespace JinnDev.JCMU.ConsoleBed.Registry;

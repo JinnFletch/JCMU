@@ -175,16 +175,29 @@ public class StoreCliDispatcher
                 if (addonDir == null) continue;
 
                 var relativeId = Path.GetRelativePath(pluginsBase, addonDir).Replace('\\', '/');
-                results.Add(relativeId);
-            }
+                results.Add(relativeId); // Maintain the cache for the uninstall command
 
-            for (int i = 0; i < results.Count; i++)
-            {
-                Console.WriteLine($"[{i + 1}] {results[i]}");
+                // Deserialize to grab the URL
+                var json = File.ReadAllText(manifestPath);
+                var manifest = System.Text.Json.JsonSerializer.Deserialize<PluginManifest>(json);
+
+                Console.WriteLine($"[{results.Count}] {relativeId}");
+
+                if (manifest != null && !string.IsNullOrWhiteSpace(manifest.RepositoryUrl))
+                {
+                    Console.WriteLine($"    {manifest.RepositoryUrl}");
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.DarkGray;
+                    Console.WriteLine("    (No repository URL provided in manifest)");
+                    Console.ResetColor();
+                }
+
+                Console.WriteLine(); // Blank line for spacing
             }
 
             onResultsFound(results);
-            Console.WriteLine();
             return Task.FromResult(Maybe.SUCCESS);
         });
     }
@@ -252,8 +265,13 @@ public class StoreCliDispatcher
                 }
                 Console.ResetColor();
 
+                // Print the clickable URL
+                Console.WriteLine($"    {list[i].RepositoryUrl}");
+
                 if (!string.IsNullOrEmpty(list[i].Description))
                     Console.WriteLine($"    {list[i].Description}");
+
+                Console.WriteLine(); // Add a blank line between results for readability
             }
 
             onResultsFound(cache);

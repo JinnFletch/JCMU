@@ -1,5 +1,5 @@
 ﻿using System.Runtime.Versioning;
-using JinnDev.JCMU.SDK.Models;
+using JinnDev.JCMU.AddonManager.Models;
 using JinnDev.Utilities.Monad;
 using Microsoft.Extensions.Logging;
 using WinReg = Microsoft.Win32.Registry;
