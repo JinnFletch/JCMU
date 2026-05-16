@@ -1,7 +1,7 @@
-﻿using System.Runtime.Versioning;
-using JinnDev.JCMU.AddonManager.Builders;
+﻿using JinnDev.JCMU.AddonManager.Builders;
 using JinnDev.JCMU.AddonManager.Installers;
 using JinnDev.JCMU.AddonManager.Interfaces;
+using JinnDev.JCMU.AddonManager.Models;
 using JinnDev.JCMU.AddonManager.Sources;
 using JinnDev.JCMU.ConsoleBed.Cli;
 using JinnDev.JCMU.ConsoleBed.Execution;
@@ -10,12 +10,15 @@ using JinnDev.JCMU.ConsoleBed.Runtime;
 using JinnDev.Utilities.Monad;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using System.Runtime.Versioning;
 
 namespace JinnDev.JCMU.ConsoleBed;
 
 [SupportedOSPlatform("windows")]
 public class Program
 {
+    private static IReadOnlyList<AddonSearchResult> _lastSearchResults = new List<AddonSearchResult>();
+
     public static async Task<int> Main(string[] args)
     {
         var services = new ServiceCollection();
@@ -66,11 +69,17 @@ public class Program
         ExecutionCliDispatcher executionDispatcher,
         CoreRegistrar coreRegistrar)
     {
+        // Run GC before every command to ensure no zombie locks 
+        // exist from the previous command.
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+
         var verb = args[0].ToLowerInvariant();
 
         var executionTask = verb switch
         {
-            "install" => storeDispatcher.HandleInstallAsync(args),
+            "search" => storeDispatcher.HandleSearchAsync(args, results => _lastSearchResults = results),
+            "install" => storeDispatcher.HandleInstallAsync(args, _lastSearchResults),
             "uninstall" => storeDispatcher.HandleUninstallAsync(args),
             "list" => StoreCliDispatcher.HandleListAsync(),
             "execute" => executionDispatcher.HandleExecuteAsync(args),
@@ -157,16 +166,26 @@ public class Program
 
     private static void PrintHelp()
     {
-        Console.WriteLine("==================================================");
-        Console.WriteLine("    Jinn Context Menu Utils (JCMU) Core CLI       ");
+        Console.WriteLine("\n==================================================");
+        Console.WriteLine("    Jinn Context Menu Utility (JCMU) Core CLI     ");
         Console.WriteLine("==================================================\n");
-        Console.WriteLine("System Commands:");
-        Console.WriteLine("  init                          Registers the root 'JinnCM' menu in Windows.");
-        Console.WriteLine("  teardown                      Removes the JCMU root menus from Windows.");
-        Console.WriteLine("\nPackage Commands:");
-        Console.WriteLine("  install <AddonId> [Version]   Downloads, compiles, and registers a GitHub addon.");
-        Console.WriteLine("  uninstall <AddonId>           Removes an addon and its registry keys.");
-        Console.WriteLine("  list                          Lists all currently installed addons.");
-        Console.WriteLine("  execute <AddonId> <Path>      (Internal) Executes an addon against a target directory.");
+
+        Console.WriteLine("Package Management:");
+        Console.WriteLine("  search <keyword>              Find new addons on GitHub.");
+        Console.WriteLine("  install <Id | Number>         Install an addon (e.g., 'install 1' after search).");
+        Console.WriteLine("  uninstall <AddonId>           Remove an addon and its registry keys.");
+        Console.WriteLine("  list                          Show all currently installed addons.");
+
+        Console.WriteLine("\nSystem Configuration:");
+        Console.WriteLine("  init                          Registers the 'JinnCM' root menu in Windows.");
+        Console.WriteLine("  teardown                      Removes all JCMU hooks from the Windows Shell.");
+        Console.WriteLine("  exit | quit                   Close the JCMU console.");
+
+        Console.WriteLine("\nAdvanced / Shell Internal:");
+        Console.WriteLine("  execute <Id> <Path>           Triggers addon logic (called by Windows Explorer).");
+
+        Console.WriteLine("\n--------------------------------------------------");
+        Console.WriteLine("Tip: Use 'search' to find addons, then 'install' with the index number!");
+        Console.WriteLine("--------------------------------------------------\n");
     }
 }

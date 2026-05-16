@@ -60,14 +60,24 @@ public class AddonInstaller : IAddonInstaller
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                 "JCMU", "Plugins", addonId);
 
-            if (!Directory.Exists(targetDirectory))
+            if (Directory.Exists(targetDirectory))
             {
-                _logger.LogWarning("Addon '{AddonId}' is not installed.", addonId);
+                Directory.Delete(targetDirectory, true);
+                _logger.LogInformation("Successfully deleted addon files.");
+
+                var parent = Path.GetDirectoryName(targetDirectory);
+                while (parent != null &&
+                       !parent.EndsWith("Plugins", StringComparison.OrdinalIgnoreCase) &&
+                       Directory.Exists(parent) &&
+                       !Directory.EnumerateFileSystemEntries(parent).Any())
+                {
+                    Directory.Delete(parent);
+                    parent = Path.GetDirectoryName(parent);
+                }
             }
             else
             {
-                Directory.Delete(targetDirectory, true);
-                _logger.LogInformation("Successfully uninstalled '{AddonId}'.", addonId);
+                _logger.LogWarning("Addon directory not found: {Path}", targetDirectory);
             }
         }).ConfigureAwait(false);
     }
