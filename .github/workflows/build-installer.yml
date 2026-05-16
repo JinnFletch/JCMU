@@ -1,10 +1,12 @@
 name: Build JCMU Installer
 
-# This action runs automatically whenever you create a new Git Tag starting with 'v' (e.g., v1.0.0)
 on:
   push:
     tags:
       - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
   build:
