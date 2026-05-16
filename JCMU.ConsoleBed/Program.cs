@@ -12,6 +12,8 @@ using JinnDev.Utilities.CommandLine;
 using JinnDev.Utilities.Monad;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Serilog;
+using Serilog.Events;
 using System.Runtime.Versioning;
 
 namespace JinnDev.JCMU.ConsoleBed;
@@ -26,65 +28,90 @@ public class Program
 
     public static async Task<int> Main(string[] args)
     {
-        var services = new ServiceCollection();
-        ConfigureServices(services);
-        _serviceProvider = services.BuildServiceProvider();
-        await using var _ = _serviceProvider.ConfigureAwait(false);
+        var logPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "JCMU", "Logs", "jcmu-core-.txt");
 
-        var storeDispatcher = _serviceProvider.GetRequiredService<StoreCliDispatcher>();
-        var executionDispatcher = _serviceProvider.GetRequiredService<ExecutionCliDispatcher>();
-        var coreRegistrar = _serviceProvider.GetRequiredService<CoreRegistrar>();
+        Log.Logger = new LoggerConfiguration()
+            .MinimumLevel.Information()
+            .MinimumLevel.Override("Microsoft", LogEventLevel.Warning) // Keep MS noise out of logs
+            .WriteTo.Console()
+            .WriteTo.File(logPath,
+                rollingInterval: RollingInterval.Day, // New file every day
+                retainedFileCountLimit: 7)            // Keep one week of logs
+            .CreateLogger();
 
-        // 1. Detect if we are entering the UI/Interactive mode
-        bool interactiveMode = args.Length > 0 && args[0].Equals("-i", StringComparison.OrdinalIgnoreCase);
-        bool isManualLaunch = args.Length == 0;
-
-        // 2. Always print help at the very top if a UI is being shown
-        if (interactiveMode || isManualLaunch)
+        try
         {
-            PrintHelp();
-        }
+            var services = new ServiceCollection();
+            ConfigureServices(services);
+            _serviceProvider = services.BuildServiceProvider();
+            await using var _ = _serviceProvider.ConfigureAwait(false);
 
-        string[] commandArgs = args;
-        if (interactiveMode)
-        {
-            commandArgs = args.Skip(1).ToArray(); // Strip -i for the router
-        }
+            var storeDispatcher = _serviceProvider.GetRequiredService<StoreCliDispatcher>();
+            var executionDispatcher = _serviceProvider.GetRequiredService<ExecutionCliDispatcher>();
+            var coreRegistrar = _serviceProvider.GetRequiredService<CoreRegistrar>();
 
-        // 3. Execute initial command if provided
-        if (commandArgs.Length > 0)
-        {
-            var result = await RouteCommandAsync(commandArgs, storeDispatcher, executionDispatcher, coreRegistrar).ConfigureAwait(false);
+            // 1. Detect if we are entering the UI/Interactive mode
+            bool interactiveMode = args.Length > 0 && args[0].Equals("-i", StringComparison.OrdinalIgnoreCase);
+            bool isManualLaunch = args.Length == 0;
 
-            // Exit immediately if this wasn't an interactive session (e.g. Shell Execute)
-            if (!interactiveMode)
+            // 2. Always print help at the very top if a UI is being shown
+            if (interactiveMode || isManualLaunch)
             {
-                return result.HasValue ? 0 : 1;
-            }
-        }
-
-        // 4. REPL Loop
-        while (true)
-        {
-            Console.WriteLine();
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.Write("JCMU> ");
-            Console.ResetColor();
-
-            var input = Console.ReadLine();
-            if (string.IsNullOrWhiteSpace(input)) continue;
-
-            if (input.Equals("exit", StringComparison.OrdinalIgnoreCase) ||
-                input.Equals("quit", StringComparison.OrdinalIgnoreCase))
-            {
-                break;
+                PrintHelp();
             }
 
-            var inputArgs = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            await RouteCommandAsync(inputArgs, storeDispatcher, executionDispatcher, coreRegistrar).ConfigureAwait(false);
-        }
+            string[] commandArgs = args;
+            if (interactiveMode)
+            {
+                commandArgs = args.Skip(1).ToArray(); // Strip -i for the router
+            }
 
-        return 0;
+            // 3. Execute initial command if provided
+            if (commandArgs.Length > 0)
+            {
+                var result = await RouteCommandAsync(commandArgs, storeDispatcher, executionDispatcher, coreRegistrar).ConfigureAwait(false);
+
+                // Exit immediately if this wasn't an interactive session (e.g. Shell Execute)
+                if (!interactiveMode)
+                {
+                    return result.HasValue ? 0 : 1;
+                }
+            }
+
+            // 4. REPL Loop
+            while (true)
+            {
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.Write("JCMU> ");
+                Console.ResetColor();
+
+                var input = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(input)) continue;
+
+                if (input.Equals("exit", StringComparison.OrdinalIgnoreCase) ||
+                    input.Equals("quit", StringComparison.OrdinalIgnoreCase))
+                {
+                    break;
+                }
+
+                var inputArgs = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                await RouteCommandAsync(inputArgs, storeDispatcher, executionDispatcher, coreRegistrar).ConfigureAwait(false);
+            }
+
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Log.Fatal(ex, "JCMU Core terminated unexpectedly");
+            return 1;
+        }
+        finally
+        {
+            await Log.CloseAndFlushAsync().ConfigureAwait(false);
+        }
     }
 
     private static async Task<Maybe> RouteCommandAsync(
@@ -187,8 +214,7 @@ public class Program
     {
         services.AddLogging(builder =>
         {
-            builder.AddConsole();
-            builder.SetMinimumLevel(LogLevel.Information);
+            builder.AddSerilog(dispose: true);
         });
 
         services.AddSingleton<ITrustManager>(x => new TrustManager());

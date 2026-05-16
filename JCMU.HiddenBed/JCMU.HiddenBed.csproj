@@ -1,0 +1,22 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<AssemblyName>jcmu-bg</AssemblyName>
+		<SupportedOSPlatform>windows</SupportedOSPlatform>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net8.0</TargetFramework>
+		<LangVersion>12</LangVersion>
+		<RootNamespace>JinnDev.$(MSBuildProjectName.Replace(" ", "_"))</RootNamespace>
+		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Authors>JinnDev</Authors>
+		<Company>Jinn Studios</Company>
+		<Product>Jinn Context Menu Utility Addon Manager</Product>
+		<Nullable>enable</Nullable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\JCMU.ConsoleBed\JCMU.ConsoleBed.csproj" />
+	</ItemGroup>
+
+</Project>

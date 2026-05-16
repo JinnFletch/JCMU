@@ -7,4 +7,5 @@
   </Folder>
   <Project Path="JCMU.AddonManager/JCMU.AddonManager.csproj" />
   <Project Path="JCMU.ConsoleBed/JCMU.ConsoleBed.csproj" Id="794e6201-caeb-4816-8930-c04a40a15405" />
+  <Project Path="JCMU.HiddenBed/JCMU.HiddenBed.csproj" Id="84983e63-3f38-444b-a69d-7cd834c79c3f" />
 </Solution>

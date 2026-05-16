@@ -152,11 +152,18 @@ public class RegistryManager : IRegistryManager
         {
             using var cmdKey = itemKey.CreateSubKey("command");
 
-            // [NEW LOGIC] Check the SDK property and append the background flag if necessary.
-            var backgroundFlag = menu.RunInBackground ? " -b" : "";
+            // --- THE MASTERY LOGIC ---
+            string targetExe = coreExePath;
 
-            // Note: %V is passed to the executable as the final argument (TargetDirectory)
-            var commandString = $"\"{coreExePath}\" execute {addonId}{backgroundFlag} \"%V\"";
+            if (menu.RunInBackground)
+            {
+                // Swap "jcmu.exe" for "jcmu-bg.exe"
+                var directory = Path.GetDirectoryName(coreExePath)!;
+                targetExe = Path.Combine(directory, "jcmu-bg.exe");
+            }
+
+            // Note: %V is the directory the user clicked on in Windows Explorer
+            var commandString = $"\"{targetExe}\" execute {addonId} \"%V\"";
 
             cmdKey.SetValue("", commandString);
         }
