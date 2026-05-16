@@ -11,16 +11,6 @@ public class RegistryManager : IRegistryManager
 {
     private readonly ILogger<RegistryManager> _logger;
 
-    // Base registry paths mapped to the SDK MenuPlacement enum.
-    // The CoreRegistrar (Step 2) will create these root anchors.
-    private static readonly Dictionary<MenuPlacement, string> PlacementPaths = new()
-    {
-        { MenuPlacement.Root, @"Software\Classes\JCMU_Menu\shell" },
-        { MenuPlacement.GitTools, @"Software\Classes\JCMU_Menu_GitTools\shell" },
-        { MenuPlacement.FileSystem, @"Software\Classes\JCMU_Menu_FileSystem\shell" },
-        { MenuPlacement.CodeGeneration, @"Software\Classes\JCMU_Menu_CodeGeneration\shell" }
-    };
-
     public RegistryManager(ILogger<RegistryManager> logger)
     {
         _logger = logger;
@@ -32,7 +22,14 @@ public class RegistryManager : IRegistryManager
         {
             _logger.LogInformation("Writing registry keys for Addon: {AddonId}", addonId);
 
-            var basePath = PlacementPaths[menu.Placement];
+            // Determine Base Path dynamically
+            var basePath = @"Software\Classes\JCMU_Menu\shell";
+
+            if (!string.IsNullOrWhiteSpace(menu.Category))
+            {
+                basePath = EnsureDynamicCategoryExists(menu.Category);
+            }
+
             using Microsoft.Win32.RegistryKey baseKey = WinReg.CurrentUser.CreateSubKey(basePath);
 
             // Format the key name with Ordinal to ensure Windows sorts the menu correctly
@@ -42,44 +39,87 @@ public class RegistryManager : IRegistryManager
         });
     }
 
+    // Creates the folder anchor on the fly if it doesn't exist
+    private static string EnsureDynamicCategoryExists(string categoryName)
+    {
+        // Sanitize the string to make a safe registry key name (e.g., "Git Tools" -> "GitTools")
+        var safeKey = new string(categoryName.Where(char.IsLetterOrDigit).ToArray());
+        var categoryKeyName = $"JCMU_Category_{safeKey}";
+
+        // 1. Create the anchor in the Root menu
+        using var rootStore = WinReg.CurrentUser.CreateSubKey(@"Software\Classes\JCMU_Menu\shell");
+        using var anchorKey = rootStore.CreateSubKey(categoryKeyName);
+        anchorKey.SetValue("MUIVerb", categoryName);
+        anchorKey.SetValue("ExtendedSubCommandsKey", categoryKeyName);
+
+        // 2. Return the path to the backing store where the addon should actually be written
+        var categoryBackingStore = $@"Software\Classes\{categoryKeyName}\shell";
+        using var _ = WinReg.CurrentUser.CreateSubKey(categoryBackingStore);
+
+        return categoryBackingStore;
+    }
+
     public Maybe UnregisterAddon(string addonId)
     {
         return Maybe.Try(() =>
         {
             _logger.LogInformation("Removing registry keys for Addon: {AddonId}", addonId);
 
-            // 1. Delete from all standard placement directories
-            foreach (var basePath in PlacementPaths.Values)
-            {
-                using var baseKey = WinReg.CurrentUser.OpenSubKey(basePath, writable: true);
-                if (baseKey != null)
-                {
-                    // Find any key that ends with the addonId (ignoring the ordinal prefix)
-                    var targetKey = baseKey.GetSubKeyNames()
-                        .FirstOrDefault(k => k.EndsWith(addonId, StringComparison.OrdinalIgnoreCase));
+            using var classesKey = WinReg.CurrentUser.OpenSubKey(@"Software\Classes", writable: true);
+            if (classesKey == null) return;
 
-                    if (targetKey != null)
-                    {
-                        baseKey.DeleteSubKeyTree(targetKey, throwOnMissingSubKey: false);
-                    }
+            // 1. Cleanup from the Root Menu
+            using var rootKey = classesKey.OpenSubKey(@"JCMU_Menu\shell", writable: true);
+            if (rootKey != null)
+            {
+                DeleteKeysEndingWith(rootKey, addonId);
+            }
+
+            // 2. Cleanup from all Dynamic Categories
+            var categoryKeys = classesKey.GetSubKeyNames()
+                .Where(k => k.StartsWith("JCMU_Category_", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            foreach (var categoryName in categoryKeys)
+            {
+                using var categoryShellKey = classesKey.OpenSubKey($@"{categoryName}\shell", writable: true);
+                if (categoryShellKey != null)
+                {
+                    DeleteKeysEndingWith(categoryShellKey, addonId);
+                }
+
+                // If the category is now empty, delete the category folder entirely!
+                using var checkKey = classesKey.OpenSubKey($@"{categoryName}\shell");
+                if (checkKey != null && checkKey.SubKeyCount == 0)
+                {
+                    classesKey.DeleteSubKeyTree(categoryName, throwOnMissingSubKey: false);
+                    rootKey?.DeleteSubKeyTree(categoryName, throwOnMissingSubKey: false);
                 }
             }
 
-            // 2. Cleanup any generated ExtendedSubCommandsKeys (Nested menus)
-            using var classesKey = WinReg.CurrentUser.OpenSubKey(@"Software\Classes", writable: true);
-            if (classesKey != null)
-            {
-                var subCommandPrefix = $"JCMU_Sub_{addonId}";
-                var orphanedKeys = classesKey.GetSubKeyNames()
-                    .Where(k => k.StartsWith(subCommandPrefix, StringComparison.OrdinalIgnoreCase))
-                    .ToList();
+            // 3. Cleanup any generated ExtendedSubCommandsKeys (Nested menus)
+            var subCommandPrefix = $"JCMU_Sub_{addonId}";
+            var orphanedKeys = classesKey.GetSubKeyNames()
+                .Where(k => k.StartsWith(subCommandPrefix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
 
-                foreach (var orphan in orphanedKeys)
-                {
-                    classesKey.DeleteSubKeyTree(orphan, throwOnMissingSubKey: false);
-                }
+            foreach (var orphan in orphanedKeys)
+            {
+                classesKey.DeleteSubKeyTree(orphan, throwOnMissingSubKey: false);
             }
         });
+    }
+
+    private static void DeleteKeysEndingWith(Microsoft.Win32.RegistryKey parentKey, string suffix)
+    {
+        var targets = parentKey.GetSubKeyNames()
+            .Where(k => k.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        foreach (var t in targets)
+        {
+            parentKey.DeleteSubKeyTree(t, throwOnMissingSubKey: false);
+        }
     }
 
     /// <summary>

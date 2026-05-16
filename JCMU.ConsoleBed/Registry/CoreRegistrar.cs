@@ -51,13 +51,7 @@ public class CoreRegistrar
             }
 
             // 2. Create the hidden backing store for the Root placement
-            // This is where Addons with MenuPlacement.Root will be written by the RegistryManager
-            using var rootStore = WinReg.CurrentUser.CreateSubKey(@"Software\Classes\JCMU_Menu\shell");
-
-            // 3. Pre-create the placement subgroups
-            CreateSubgroupAnchor(rootStore, "001_GitTools", "Git Tools", "JCMU_Menu_GitTools");
-            CreateSubgroupAnchor(rootStore, "002_FileSystem", "File System", "JCMU_Menu_FileSystem");
-            CreateSubgroupAnchor(rootStore, "003_CodeGeneration", "Code Gen", "JCMU_Menu_CodeGeneration");
+            using var _ = WinReg.CurrentUser.CreateSubKey(@"Software\Classes\JCMU_Menu\shell");
 
             _logger.LogInformation("Core registry initialization successful.");
         });
@@ -80,30 +74,25 @@ public class CoreRegistrar
                 hookKey?.DeleteSubKeyTree("JCMU_Core", throwOnMissingSubKey: false);
             }
 
-            // Remove the Backing Stores
+            // Remove all generated Backing Stores
             using var classesKey = WinReg.CurrentUser.OpenSubKey(@"Software\Classes", writable: true);
             if (classesKey != null)
             {
+                // Delete the root
                 classesKey.DeleteSubKeyTree("JCMU_Menu", throwOnMissingSubKey: false);
-                classesKey.DeleteSubKeyTree("JCMU_Menu_GitTools", throwOnMissingSubKey: false);
-                classesKey.DeleteSubKeyTree("JCMU_Menu_FileSystem", throwOnMissingSubKey: false);
-                classesKey.DeleteSubKeyTree("JCMU_Menu_CodeGeneration", throwOnMissingSubKey: false);
+
+                // Delete all dynamic categories created by addons
+                var dynamicKeys = classesKey.GetSubKeyNames()
+                    .Where(k => k.StartsWith("JCMU_Category_", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                foreach (var key in dynamicKeys)
+                {
+                    classesKey.DeleteSubKeyTree(key, throwOnMissingSubKey: false);
+                }
             }
 
             _logger.LogInformation("Core registry teardown successful.");
         });
-    }
-
-    /// <summary>
-    /// Helper method to create a cascading sub-menu anchor.
-    /// </summary>
-    private static void CreateSubgroupAnchor(Microsoft.Win32.RegistryKey parentKey, string keyName, string displayName, string targetExtendedKey)
-    {
-        using var subgroupKey = parentKey.CreateSubKey(keyName);
-        subgroupKey.SetValue("MUIVerb", displayName);
-        subgroupKey.SetValue("ExtendedSubCommandsKey", targetExtendedKey);
-
-        // Ensure the actual target backing store exists so the RegistryManager can write to it later
-        using var _ = WinReg.CurrentUser.CreateSubKey($@"Software\Classes\{targetExtendedKey}\shell");
     }
 }
