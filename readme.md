@@ -28,6 +28,7 @@ But it's not just a menu—it's a **Decentralized App Store**. Using the built-i
 * 🛡️ **Zero "DLL Hell":** Addons run in strictly isolated memory spaces. They can't break each other, and they can't break the Core.
 * 🧹 **Clean Removal:** Typing `uninstall` completely eradicates the addon and scrubs the Windows Registry clean. No orphaned garbage left behind.
 * 🔒 **Secure by Default:** Features a strict `Trust` system. Code doesn't compile or install on your machine unless you explicitly whitelist the author.
+* 📝 **Full Traceability:** Integrated persistent logging ensures that even background tasks are never a "black box" if something goes wrong.
 
 ---
 
@@ -87,6 +88,11 @@ JCMU> uninstall 1
 ```
 *(This cleans up the files, releases the locks, and scrubs the Windows Registry. It's like it was never there.)*
 
+```shell
+JCMU> dev link [path]          # Create a local junction for active development.
+JCMU> dev unlink <AddonId>     # Remove a developer link and its registry hooks.
+```
+
 ---
 
 ## 🛠️ For Developers: Build Your Own Addon!
@@ -94,5 +100,7 @@ JCMU> uninstall 1
 Can't find the exact tool you need? Building a JCMU Addon is incredibly easy. You don't need to know anything about the Windows Registry or OS APIs. 
 
 If you know basic C# and can write a simple `manifest.json`, you can have a custom right-click tool running in under 5 minutes.
+
+> **Pro Tip:** Use `dev link` to map your project's folder directly into the JCMU engine so you can test code changes instantly without re-installing.
 
 👉 **[Check out the JCMU SDK Documentation to get started!](JCMU.SDK/readme.md)**
