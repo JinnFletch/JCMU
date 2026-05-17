@@ -26,74 +26,104 @@ public class DevCliDispatcher
         _logger = logger;
     }
 
-    public async Task<Maybe> HandleLinkAsync(string[] args)
+    public Task<Maybe> HandleLinkAsync(string[] args)
     {
-        // Default to current directory if they didn't provide a path
-        var rawPath = args.Length > 2 ? args[2] : Environment.CurrentDirectory;
-        var searchDir = Path.GetFullPath(rawPath);
-
-        if (!Directory.Exists(searchDir))
-            return Maybe.Fail($"Directory not found: {searchDir}");
-
-        Console.WriteLine($"\n--- Scanning for compiled Addon in: {searchDir} ---");
-
-        // Auto-detect the compiled output (bin/Debug/...) by finding the newest manifest.json
-        var manifestFiles = Directory.GetFiles(searchDir, "manifest.json", SearchOption.AllDirectories)
-            .Where(f => f.Contains(@"\bin\", StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(File.GetLastWriteTimeUtc)
-            .ToList();
-
-        if (!manifestFiles.Any())
-            return Maybe.Fail("Could not find a compiled 'manifest.json' in any 'bin' directory. Did you build the project in Visual Studio first?");
-
-        var targetManifestPath = manifestFiles.First();
-        var targetOutputDirectory = Path.GetDirectoryName(targetManifestPath)!;
-
-        // Parse Manifest
-        var json = await File.ReadAllTextAsync(targetManifestPath).ConfigureAwait(false);
-        var manifest = JsonSerializer.Deserialize<PluginManifest>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-                       ?? throw new Exception("Failed to parse manifest.json.");
-
-        var finalPluginDirectory = Path.Combine(PluginsBase, manifest.AddonId);
-
-        // Cleanup existing installation or old link
-        if (Directory.Exists(finalPluginDirectory))
+        // 1. Safely Parse Arguments
+        return Maybe.Try(() =>
         {
-            Directory.Delete(finalPluginDirectory, true);
-        }
+            var rawPath = args.Length > 2 ? string.Join(" ", args.Skip(2)) : Environment.CurrentDirectory;
+            return Maybe.Some(Path.GetFullPath(rawPath.Trim('"')));
+        })
 
-        Directory.CreateDirectory(PluginsBase);
+        // 2. Validate Directory
+        .Bind(searchDir => Directory.Exists(searchDir)
+            ? Maybe<string>.Some(searchDir)
+            : Maybe<string>.None($"Directory not found: {searchDir}"))
 
-        // Use your CommandLine Utility to create a Windows Junction!
-        var request = CommandBuilder.Create("mklink")
-            .WithArgument("/J")
-            .WithQuotedArgument(finalPluginDirectory)
-            .WithQuotedArgument(targetOutputDirectory)
-            .Build();
+        // 3. Locate the Manifest
+        .Bind(searchDir =>
+        {
+            Console.WriteLine($"\n--- Scanning for compiled Addon in: {searchDir} ---");
 
-        return await _cmdRunner.RunBufferedAsync(request)
-            .MatchAsync(
-                success => success.ExitCode != 0 ? Maybe.SUCCESS : Maybe.Fail($"Failed to create Directory Junction: {success.StandardError}"),
-                none => Maybe.Fail($"Failed to create Directory Junction: {none.Message}"))
-            .BindAsync(res =>
-            {
-                // Register Registry Keys
-                var coreExePath = Process.GetCurrentProcess().MainModule?.FileName
-                                  ?? throw new Exception("Could not determine the executing Core EXE path.");
+            var manifestFiles = Directory.GetFiles(searchDir, "manifest.json", SearchOption.AllDirectories)
+                .Where(f => f.Contains(@"\bin\", StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .ToList();
 
-                var registryResult = _registryManager.RegisterAddon(manifest.AddonId, manifest.Menu, coreExePath);
+            return manifestFiles.Any()
+                ? Maybe<string>.Some(manifestFiles.First())
+                : Maybe<string>.None(
+                    "Could not find a compiled 'manifest.json' in any 'bin' directory.\n" +
+                    " -> Did you build the project in Visual Studio first?\n" +
+                    " -> Is 'manifest.json' set to 'Copy to Output Directory' in your project properties?");
+        })
 
-                if (registryResult.HasValue)
-                {
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.WriteLine($"\n[SUCCESS] '{manifest.AddonId}' is now Dev-Linked!");
-                    Console.WriteLine($"Junction: {finalPluginDirectory} -> {targetOutputDirectory}");
-                    Console.WriteLine("Any rebuilds in Visual Studio will be instantly available in the right-click menu.");
-                }
+        // 4. Safely Read and Parse JSON
+        .BindAsync(async targetManifestPath =>
+        {
+            var outputDir = Path.GetDirectoryName(targetManifestPath)!;
+            var json = await File.ReadAllTextAsync(targetManifestPath).ConfigureAwait(false);
+            var manifest = JsonSerializer.Deserialize<PluginManifest>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
-                Console.ResetColor();
-                return Task.FromResult(registryResult);
-            }).ConfigureAwait(false);
+            return manifest != null
+                ? Maybe.Some<(PluginManifest Manifest, string OutputDir)>((manifest, outputDir))
+                : Maybe.None<(PluginManifest Manifest, string OutputDir)>("Failed to parse manifest.json.");
+        })
+
+        // 5. Safely Prep Directories
+        .BindAsync(ctx =>
+        {
+            var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.AddonId);
+            if (Directory.Exists(finalPluginDirectory))
+                Directory.Delete(finalPluginDirectory, true);
+
+            Directory.CreateDirectory(PluginsBase);
+            return Maybe.Some(ctx);
+        })
+
+        // 6. Execute mklink and evaluate ExitCode
+        .BindAsync(ctx =>
+        {
+            var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.AddonId);
+            var request = CommandBuilder.Create("mklink")
+                .WithArgument("/J")
+                .WithQuotedArgument(finalPluginDirectory)
+                .WithQuotedArgument(ctx.OutputDir)
+                .Build();
+
+            return _cmdRunner.RunBufferedAsync(request)
+                // Evaluate ExitCode. If 0, convert to SUCCESS, else FAIL.
+                .BindAsync(cmd => cmd.ExitCode == 0
+                    ? Maybe.SUCCESS
+                    : Maybe.Fail($"Failed to create Directory Junction: {cmd.StandardError}\n{cmd.StandardOutput}"))
+                // Re-introduce our context tuple back into the pipeline
+                .WithValueAsync(ctx);
+        })
+
+        // 7. Safely Register Registry Keys
+        .BindAsync(ctx =>
+        {
+            var coreExePath = Process.GetCurrentProcess().MainModule?.FileName;
+            if (coreExePath == null)
+                return Maybe.None<(PluginManifest Manifest, string OutputDir)>("Could not determine the executing Core EXE path.");
+
+            return _registryManager.RegisterAddon(ctx.Manifest.AddonId, ctx.Manifest.Menu, coreExePath)
+                .WithValue(ctx);
+        })
+
+        // 8. Side-Effect: Success UI
+        .TapAsync(ctx =>
+        {
+            var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.AddonId);
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"\n[SUCCESS] '{ctx.Manifest.AddonId}' is now Dev-Linked!");
+            Console.WriteLine($"Junction: {finalPluginDirectory} -> {ctx.OutputDir}");
+            Console.WriteLine("Any rebuilds in Visual Studio will be instantly available in the right-click menu.");
+            Console.ResetColor();
+        })
+
+        // 9. Flatten back to parameterless Maybe for the dispatcher
+        .BindAsync(_ => Maybe.SUCCESS);
     }
 
     public Task<Maybe> HandleUnlinkAsync(string[] args)

@@ -23,7 +23,7 @@ public class HostLogger : IPluginLogger
     {
         return Maybe.Try(() =>
         {
-            _logger.LogInformation("{AddonPrefix} {Message}", _addonPrefix, message);
+            _logger.LogInformation("{Message}", message);
         });
     }
 

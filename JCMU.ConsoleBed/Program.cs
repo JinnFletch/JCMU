@@ -33,13 +33,17 @@ public class Program
             "JCMU", "Logs", "jcmu-core-.txt");
 
         Log.Logger = new LoggerConfiguration()
-            .MinimumLevel.Information()
-            .MinimumLevel.Override("Microsoft", LogEventLevel.Warning) // Keep MS noise out of logs
-            .WriteTo.Console()
-            .WriteTo.File(logPath,
-                rollingInterval: RollingInterval.Day, // New file every day
-                retainedFileCountLimit: 7)            // Keep one week of logs
-            .CreateLogger();
+                    .MinimumLevel.Information()
+                    .MinimumLevel.Override("Microsoft", LogEventLevel.Warning) // Keep MS noise out of logs
+                    .WriteTo.Console(
+                        // {Message:lj} prints the exact string with no quotes. No timestamps or [INF] tags!
+                        outputTemplate: "{Message:lj}{NewLine}{Exception}")
+                    .WriteTo.File(logPath,
+                        // Keep the file logs highly detailed for troubleshooting
+                        outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}",
+                        rollingInterval: RollingInterval.Day,
+                        retainedFileCountLimit: 7)
+                    .CreateLogger();
 
         try
         {
