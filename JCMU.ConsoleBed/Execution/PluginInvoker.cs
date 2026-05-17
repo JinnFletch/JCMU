@@ -28,10 +28,10 @@ public class PluginInvoker : IPluginInvoker
     /// <param name="addonId">The unique identifier of the installed addon.</param>
     /// <param name="targetDirectory">The absolute path the user right-clicked on.</param>
     /// <returns>A monad representing the success or failure of the execution.</returns>
-    public async Task<Maybe> ExecuteAsync(string addonId, string targetDirectory)
+    public async Task<Maybe<int>> ExecuteAsync(string addonId, string targetDirectory)
     {
         if (string.IsNullOrWhiteSpace(targetDirectory) || !Directory.Exists(targetDirectory))
-            return Maybe.Fail($"Target directory does not exist or is invalid: {targetDirectory}");
+            return Maybe.None<int>($"Target directory does not exist or is invalid: {targetDirectory}");
 
         _logger.LogInformation("Invoking Addon '{AddonId}' on target: {TargetDirectory}", addonId, targetDirectory);
 
@@ -55,17 +55,13 @@ public class PluginInvoker : IPluginInvoker
     /// <summary>
     /// The protected inner execution boundary.
     /// </summary>
-    private async Task<Maybe> ExecuteInternalAsync(string addonId, string targetDirectory, LoadedPlugin loadedPlugin)
+    private async Task<Maybe<int>> ExecuteInternalAsync(string addonId, string targetDirectory, LoadedPlugin loadedPlugin)
     {
         // 1. Build the toolbelt for the plugin
         var hostServices = new HostServices(addonId, _loggerFactory);
 
         // 2. Build the snapshot of the world
-        var context = new ActionContext
-        {
-            TargetDirectory = targetDirectory,
-            HostServices = hostServices
-        };
+        var context = new ActionContext { TargetDirectory = targetDirectory, HostServices = hostServices };
 
         // 3. Double-wrap the execution. 
         // The SDK demands a Task<Maybe>, but we still wrap it in TryAsync just in case 
@@ -74,18 +70,15 @@ public class PluginInvoker : IPluginInvoker
             await loadedPlugin.AddonInstance.ExecuteAsync(context).ConfigureAwait(false)
         ).ConfigureAwait(false);
 
-        // 4. Flatten the nested Maybe<Maybe> resulting from TryAsync(Task<Maybe>)
-        var finalResult = executionResult.Bind(innerMaybe => innerMaybe);
-
-        if (finalResult.HasValue)
+        if (executionResult.HasValue)
         {
             _logger.LogInformation("Addon '{AddonId}' execution completed successfully.", addonId);
         }
         else
         {
-            _logger.LogError(finalResult.Exception, "Addon '{AddonId}' execution failed: {Message}", addonId, finalResult.Message);
+            _logger.LogError(executionResult.Exception, "Addon '{AddonId}' execution failed: {Message}", addonId, executionResult.Message);
         }
 
-        return finalResult;
+        return executionResult;
     }
 }

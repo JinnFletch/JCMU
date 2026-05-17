@@ -50,7 +50,7 @@ public class DevCliDispatcher
                 .OrderByDescending(File.GetLastWriteTimeUtc)
                 .ToList();
 
-            return manifestFiles.Any()
+            return manifestFiles.Count != 0
                 ? Maybe<string>.Some(manifestFiles.First())
                 : Maybe<string>.None(
                     "Could not find a compiled 'manifest.json' in any 'bin' directory.\n" +

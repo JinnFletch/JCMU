@@ -5,7 +5,8 @@ using Microsoft.Extensions.Logging;
 namespace JinnDev.JCMU.ConsoleBed.Cli;
 
 /// <summary>
-/// Handles the hidden execution commands triggered by the Windows Native Shell.
+/// Instantiates and executes a specific addon against a target directory.
+/// Expected format: `jcmu execute <AddonId> [-b] "<TargetDirectory>"`
 /// </summary>
 public class ExecutionCliDispatcher
 {
@@ -32,26 +33,57 @@ public class ExecutionCliDispatcher
         }
 
         var addonId = args[1];
-        var targetDirectory = args[2].Trim('"'); // Strip quotes passed by Windows Explorer
+        var targetDirectory = args[2].Trim('"');
 
         _logger.LogInformation("--- Execution Triggered via Shell ---");
 
+        // The Invoker now returns Maybe<int>
         var result = await _invoker.ExecuteAsync(addonId, targetDirectory).ConfigureAwait(false);
 
-        // If it's running in the visible Console (because it failed or RunInBackground = false)
-        // We want to pause so the user can actually read the error before the box closes.
-        if (!result.HasValue && !Console.IsOutputRedirected && Console.WindowHeight > 0)
+        // Only perform interactive UI pauses if we are actually in a visible console
+        if (!Console.IsOutputRedirected && Console.WindowHeight > 0)
         {
-            Console.WriteLine();
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"[EXECUTION FAILED]: {addonId}");
-            Console.WriteLine(result.Message);
-            if (result.IsExceptionState) Console.WriteLine(result.Exception!.Message);
-            Console.ResetColor();
-            Console.WriteLine("\nPress any key to exit...");
-            Console.ReadKey(true);
+            await result.MatchAsync(
+                someAsync: async seconds =>
+                {
+                    if (seconds < 0)
+                    {
+                        Console.WriteLine("\n[Execution Complete] Press any key to exit...");
+                        Console.ReadKey(true);
+                    }
+                    else if (seconds > 0)
+                    {
+                        Console.WriteLine();
+                        await RunCountdownAsync(seconds, "Closing in {0} seconds...").ConfigureAwait(false);
+                    }
+                },
+                noneAsync: async err =>
+                {
+                    Console.WriteLine();
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[EXECUTION FAILED]: {addonId}");
+                    Console.WriteLine(err.Message);
+                    if (err.IsExceptionState) Console.WriteLine(err.Exception!.Message);
+                    Console.ResetColor();
+                    Console.WriteLine();
+
+                    await RunCountdownAsync(10, "Closing due to failure in {0} seconds...").ConfigureAwait(false);
+                }
+            ).ConfigureAwait(false);
         }
 
-        return result;
+        // Downgrade the result to a parameterless Maybe to satisfy the CLI router
+        return result.HasValue ? Maybe.SUCCESS : Maybe.PropagateFailure(result);
+    }
+
+    private static async Task RunCountdownAsync(int seconds, string messageTemplate)
+    {
+        for (int i = seconds; i > 0; i--)
+        {
+            // \r returns the cursor to the start of the line for a clean overwriting effect
+            Console.Write($"\r{string.Format(messageTemplate, i)}   ");
+            await Task.Delay(1000).ConfigureAwait(false);
+        }
+        Console.WriteLine();
     }
 }
