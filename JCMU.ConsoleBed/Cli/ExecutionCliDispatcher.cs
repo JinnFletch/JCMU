@@ -62,8 +62,9 @@ public class ExecutionCliDispatcher
                     Console.WriteLine();
                     Console.ForegroundColor = ConsoleColor.Red;
                     Console.WriteLine($"[EXECUTION FAILED]: {addonId}");
+
                     Console.WriteLine(err.Message);
-                    if (err.IsExceptionState) Console.WriteLine(err.Exception!.Message);
+
                     Console.ResetColor();
                     Console.WriteLine();
 

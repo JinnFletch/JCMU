@@ -109,9 +109,25 @@ public class PluginLoader : IPluginLoader
         }
         catch (ReflectionTypeLoadException ex)
         {
-            // This is the magic block that tells you the REAL error
-            var messages = string.Join("\n", ex.LoaderExceptions.Select(e => e?.Message));
-            throw new Exception($"Type Load Failure in {addonId}:\n{messages}", ex);
+            // Safely extract whatever loader exceptions exist
+            var loaderErrors = ex.LoaderExceptions
+                .Where(e => e != null)
+                .Select(e => e!.Message)
+                .Distinct()
+                .ToList();
+
+            var errorDetails = loaderErrors.Any()
+                ? string.Join("\n  -> ", loaderErrors)
+                : ex.Message;
+
+            throw new Exception(
+                $"SDK Compatibility Error.\n" +
+                $"This addon is likely built for an older/incompatible version of the JCMU SDK and needs to be updated by its author.\n" +
+                $"Details: {errorDetails}", ex);
+        }
+        catch (Exception ex)
+        {
+            throw new Exception($"Failed to load addon. It might be incompatible with this version of JCMU.\nDetails: {ex.Message}", ex);
         }
     }
 }
