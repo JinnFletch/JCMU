@@ -19,7 +19,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<PackageReference Include="JinnDev.Utilities.CommandLine" Version="8.0.1" />
+		<PackageReference Include="JinnDev.Utilities.CommandLine" Version="8.0.4" />
 	</ItemGroup>
 
 </Project>
