@@ -3,12 +3,14 @@ using JinnDev.JCMU.ConsoleBed.Services;
 using JinnDev.JCMU.SDK.Models;
 using JinnDev.Utilities.Monad;
 using Microsoft.Extensions.Logging;
+using System.Runtime.Versioning;
 
 namespace JinnDev.JCMU.ConsoleBed.Execution;
 
 /// <summary>
 /// Orchestrates the lifecycle of an Addon execution: Loading, Executing, and Unloading.
 /// </summary>
+[SupportedOSPlatform("windows")]
 public class PluginInvoker : IPluginInvoker
 {
     private readonly IPluginLoader _loader;

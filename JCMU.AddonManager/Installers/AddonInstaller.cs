@@ -82,6 +82,16 @@ public class AddonInstaller : IAddonInstaller
             {
                 _logger.LogWarning("Addon directory not found: {Path}", targetDirectory);
             }
+
+            // Delete the configuration and secrets ---
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var configFilePath = Path.Combine(localAppData, "JCMU", "Configs", $"{addonId}.json");
+
+            if (File.Exists(configFilePath))
+            {
+                File.Delete(configFilePath);
+                _logger.LogInformation("Successfully deleted addon configuration and secrets.");
+            }
         }).ConfigureAwait(false);
     }
 
