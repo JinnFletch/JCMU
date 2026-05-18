@@ -74,7 +74,8 @@ internal static class FileSystemManager
             if (!validation.HasValue)
                 throw new Exception($"Manifest validation failed: {validation.Message}");
 
-            var currentCoreVersion = typeof(FileSystemManager).Assembly.GetName().Version;
+            var currentCoreVersion = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version
+                         ?? typeof(FileSystemManager).Assembly.GetName().Version;
 
             if (Version.TryParse(manifest.MinCoreVersion, out var minVersion))
             {
