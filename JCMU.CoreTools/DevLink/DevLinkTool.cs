@@ -1,46 +1,46 @@
-﻿using JinnDev.JCMU.AddonManager.Models;
-using JinnDev.JCMU.ConsoleBed.Registry;
+﻿using JinnDev.JCMU.AddonManager.Interfaces;
+using JinnDev.JCMU.AddonManager.Models;
 using JinnDev.Utilities.CommandLine;
 using JinnDev.Utilities.Monad;
-using Microsoft.Extensions.Logging;
-using System.Data.Common;
 using System.Diagnostics;
 using System.Text.Json;
 
-namespace JinnDev.JCMU.ConsoleBed.Cli;
+namespace JinnDev.JCMU.CoreTools.DevLink;
 
-public class DevCliDispatcher
+public class DevLinkTool : ICoreTool
 {
     private readonly IRegistryManager _registryManager;
     private readonly IStatelessRunner _cmdRunner;
-    private readonly ILogger<DevCliDispatcher> _logger;
 
     private static readonly string PluginsBase = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "JCMU", "Plugins");
 
-    public DevCliDispatcher(IRegistryManager registryManager, IStatelessRunner cmdRunner, ILogger<DevCliDispatcher> logger)
+    public string ToolId => "Core.DevLink";
+
+    public MenuDefinition Menu => new MenuDefinition
+    {
+        MenuItemName = "Install Addon Locally (Dev Link)",
+        IconPath = "imageres.dll,-163", // Windows Installation Box
+        Ordinal = 20,
+        RunInBackground = false // We want the console to appear so they see success/errors
+    };
+
+    public DevLinkTool(IRegistryManager registryManager, IStatelessRunner cmdRunner)
     {
         _registryManager = registryManager;
         _cmdRunner = cmdRunner;
-        _logger = logger;
     }
 
-    public Task<Maybe> HandleLinkAsync(string[] args)
+    public Task<Maybe> ExecuteAsync(string targetDirectory)
     {
-        // 1. Safely Parse Arguments
         return Maybe.Try(() =>
         {
-            var rawPath = args.Length > 2 ? string.Join(" ", args.Skip(2)) : Environment.CurrentDirectory;
-            return Maybe.Some(Path.GetFullPath(rawPath.Trim('"')));
+            var searchDir = Path.GetFullPath(targetDirectory.Trim('"'));
+            return Directory.Exists(searchDir)
+                ? Maybe<string>.Some(searchDir)
+                : Maybe<string>.None($"Directory not found: {searchDir}");
         })
-
-        // 2. Validate Directory
-        .Bind(searchDir => Directory.Exists(searchDir)
-            ? Maybe<string>.Some(searchDir)
-            : Maybe<string>.None($"Directory not found: {searchDir}"))
-
-        // 3. Locate the Manifest
         .Bind(searchDir =>
         {
             Console.WriteLine($"\n--- Scanning for compiled Addon in: {searchDir} ---");
@@ -50,15 +50,13 @@ public class DevCliDispatcher
                 .OrderByDescending(File.GetLastWriteTimeUtc)
                 .ToList();
 
-            return manifestFiles.Count != 0
+            return manifestFiles.Any()
                 ? Maybe<string>.Some(manifestFiles.First())
                 : Maybe<string>.None(
                     "Could not find a compiled 'manifest.json' in any 'bin' directory.\n" +
                     " -> Did you build the project in Visual Studio first?\n" +
                     " -> Is 'manifest.json' set to 'Copy to Output Directory' in your project properties?");
         })
-
-        // 4. Safely Read and Parse JSON
         .BindAsync(async targetManifestPath =>
         {
             var outputDir = Path.GetDirectoryName(targetManifestPath)!;
@@ -66,11 +64,9 @@ public class DevCliDispatcher
             var manifest = JsonSerializer.Deserialize<PluginManifest>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
             return manifest != null
-                ? Maybe.Some<(PluginManifest Manifest, string OutputDir)>((manifest, outputDir))
-                : Maybe.None<(PluginManifest Manifest, string OutputDir)>("Failed to parse manifest.json.");
+                ? Maybe<(PluginManifest Manifest, string OutputDir)>.Some((manifest, outputDir))
+                : Maybe<(PluginManifest Manifest, string OutputDir)>.None("Failed to parse manifest.json.");
         })
-
-        // 5. Safely Prep Directories
         .BindAsync(ctx =>
         {
             var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.AddonId);
@@ -78,10 +74,8 @@ public class DevCliDispatcher
                 Directory.Delete(finalPluginDirectory, true);
 
             Directory.CreateDirectory(PluginsBase);
-            return Maybe.Some(ctx);
+            return Maybe<(PluginManifest Manifest, string OutputDir)>.Some(ctx);
         })
-
-        // 6. Execute mklink and evaluate ExitCode
         .BindAsync(ctx =>
         {
             var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.AddonId);
@@ -92,26 +86,20 @@ public class DevCliDispatcher
                 .Build();
 
             return _cmdRunner.RunBufferedAsync(request)
-                // Evaluate ExitCode. If 0, convert to SUCCESS, else FAIL.
                 .BindAsync(cmd => cmd.ExitCode == 0
                     ? Maybe.SUCCESS
                     : Maybe.Fail($"Failed to create Directory Junction: {cmd.StandardError}\n{cmd.StandardOutput}"))
-                // Re-introduce our context tuple back into the pipeline
                 .WithValueAsync(ctx);
         })
-
-        // 7. Safely Register Registry Keys
         .BindAsync(ctx =>
         {
             var coreExePath = Process.GetCurrentProcess().MainModule?.FileName;
             if (coreExePath == null)
-                return Maybe.None<(PluginManifest Manifest, string OutputDir)>("Could not determine the executing Core EXE path.");
+                return Maybe<(PluginManifest Manifest, string OutputDir)>.None("Could not determine the executing Core EXE path.");
 
             return _registryManager.RegisterAddon(ctx.Manifest.AddonId, ctx.Manifest.Menu, coreExePath)
                 .WithValue(ctx);
         })
-
-        // 8. Side-Effect: Success UI
         .TapAsync(ctx =>
         {
             var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.AddonId);
@@ -121,33 +109,6 @@ public class DevCliDispatcher
             Console.WriteLine("Any rebuilds in Visual Studio will be instantly available in the right-click menu.");
             Console.ResetColor();
         })
-
-        // 9. Flatten back to parameterless Maybe for the dispatcher
         .BindAsync(_ => Maybe.SUCCESS);
-    }
-
-    public Task<Maybe> HandleUnlinkAsync(string[] args)
-    {
-        if (args.Length < 3) return Task.FromResult(Maybe.Fail("Usage: jcmu dev unlink <AddonId>"));
-        var addonId = args[2];
-
-        Console.WriteLine($"\n--- Unlinking Dev Addon: {addonId} ---");
-
-        var targetDirectory = Path.Combine(PluginsBase, addonId);
-
-        if (!Directory.Exists(targetDirectory))
-            return Task.FromResult(Maybe.Fail($"No addon found with ID '{addonId}' at {targetDirectory}."));
-
-        // Unregister from Windows Explorer
-        _registryManager.UnregisterAddon(addonId);
-
-        // Note: In .NET, Directory.Delete on a Symlink/Junction deletes ONLY the link, not the contents!
-        Directory.Delete(targetDirectory, recursive: false);
-
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"\n[SUCCESS] Dev-Link for '{addonId}' has been removed.");
-        Console.ResetColor();
-
-        return Task.FromResult(Maybe.SUCCESS);
     }
 }

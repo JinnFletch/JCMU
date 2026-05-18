@@ -1,5 +1,5 @@
 #define AppName "Jinn Context Menu Utility (JCMU)"
-#define AppVersion GetFileVersion("JCMU.ConsoleBed\bin\Release\net8.0\win-x64\publish\jcmu.exe")
+#define AppVersion GetVersionNumbersString("JCMU.ConsoleBed\bin\Release\net8.0\win-x64\publish\jcmu.exe")
 
 [Setup]
 AppId={{YOUR-GUID-HERE}}
@@ -16,12 +16,11 @@ SolidCompression=yes
 ChangesEnvironment=yes
 ; Changed to admin because we are writing to {commonpf}
 PrivilegesRequired=admin
+OutputDir=Output
 
 [Files]
-; The main executable
-Source: "JCMU.ConsoleBed\bin\Release\net8.0\win-x64\publish\jcmu.exe"; DestDir: "{app}"; Flags: ignoreversion
-; The icons folder
-Source: "JCMU.ConsoleBed\bin\Release\net8.0\win-x64\publish\Icons\*"; DestDir: "{app}\Icons"; Flags: ignoreversion recursesubdirs 
+; This grabs the jcmu.exe AND the Icons folder automatically
+Source: "JCMU.ConsoleBed\bin\Release\net8.0\win-x64\publish\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 
 [Registry]
 ; Adds the installation folder to the User's PATH Environment Variable

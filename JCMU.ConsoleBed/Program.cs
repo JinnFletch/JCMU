@@ -8,6 +8,7 @@ using JinnDev.JCMU.ConsoleBed.Cli;
 using JinnDev.JCMU.ConsoleBed.Execution;
 using JinnDev.JCMU.ConsoleBed.Registry;
 using JinnDev.JCMU.ConsoleBed.Runtime;
+using JinnDev.JCMU.CoreTools;
 using JinnDev.Utilities.CommandLine;
 using JinnDev.Utilities.Monad;
 using Microsoft.Extensions.DependencyInjection;
@@ -135,18 +136,24 @@ public class Program
         _lastSearchResults = null;
         _lastListResults = null;
 
+        var toolDispatcher = _serviceProvider.GetRequiredService<ToolCliDispatcher>();
+
         var executionTask = verb switch
         {
             "search" => storeDispatcher.HandleSearchAsync(args, results => _lastSearchResults = results),
             "install" => storeDispatcher.HandleInstallAsync(args, searchCache),
             "list" => StoreCliDispatcher.HandleListAsync(results => _lastListResults = results),
+            "update" => storeDispatcher.HandleUpdateAsync(args, listCache),
             "uninstall" => storeDispatcher.HandleUninstallAsync(args, listCache),
             "execute" => executionDispatcher.HandleExecuteAsync(args),
             "init" => Task.FromResult(InitializePlatform(coreRegistrar)),
             "teardown" => Task.FromResult(TeardownPlatform(coreRegistrar)),
             "trust" => storeDispatcher.HandleTrustAsync(args),
             "untrust" => storeDispatcher.HandleUntrustAsync(args),
-            "dev" => RouteDevCommandAsync(args),
+            "tool" => args.Length > 2
+                      ? toolDispatcher.HandleToolAsync(args[1], args[2].Trim('"'))
+                      : Task.FromResult(Maybe.Fail("Usage: jcmu tool <ToolId> <TargetDirectory>")),
+            "dev" => RouteDevCommandAsync(args, toolDispatcher),
             _ => Task.FromResult(Maybe.Fail($"Unknown command: {verb}"))
         };
 
@@ -162,18 +169,19 @@ public class Program
         return result;
     }
 
-    private static Task<Maybe> RouteDevCommandAsync(string[] args)
+    private static Task<Maybe> RouteDevCommandAsync(string[] args, ToolCliDispatcher toolDispatcher)
     {
-        // We resolve it here to avoid passing too many dependencies into the primary RouteCommandAsync
-        var devDispatcher = _serviceProvider.GetRequiredService<DevCliDispatcher>();
-
         if (args.Length < 2)
             return Task.FromResult(Maybe.Fail("Usage: jcmu dev link [path] OR jcmu dev unlink <AddonId>"));
 
         return args[1].ToLowerInvariant() switch
         {
-            "link" => devDispatcher.HandleLinkAsync(args),
-            "unlink" => devDispatcher.HandleUnlinkAsync(args),
+            "link" => toolDispatcher.HandleToolAsync("Core.DevLink", args.Length > 2 ? string.Join(" ", args.Skip(2)) : Environment.CurrentDirectory),
+
+            "unlink" => args.Length > 2
+                        ? toolDispatcher.HandleToolAsync("Core.DevUnlink", args[2])
+                        : Task.FromResult(Maybe.Fail("Usage: jcmu dev unlink <AddonId>")),
+
             _ => Task.FromResult(Maybe.Fail($"Unknown dev command: {args[1]}"))
         };
     }
@@ -226,14 +234,27 @@ public class Program
         services.AddTransient<IAddonBuilder>(x => new DotNetAddonBuilder());
         services.AddTransient<IAddonInstaller>(x => new AddonInstaller(x.GetRequiredService<IAddonBuilder>(), x.GetRequiredService<ITrustManager>(), x.GetRequiredService<ILogger<AddonInstaller>>()));
         services.AddTransient<IRegistryManager>(x => new RegistryManager(x.GetRequiredService<ILogger<RegistryManager>>()));
-        services.AddTransient<CoreRegistrar>(x => new CoreRegistrar(x.GetRequiredService<ILogger<CoreRegistrar>>()));
+        services.AddTransient<CoreRegistrar>(x => new CoreRegistrar(x.GetRequiredService<IRegistryManager>(), x.GetRequiredService<IEnumerable<ICoreTool>>(), x.GetRequiredService<ILogger<CoreRegistrar>>()));
         services.AddSingleton<IPluginLoader>(x => new PluginLoader(x.GetRequiredService<ILogger<PluginLoader>>()));
         services.AddSingleton<IPluginInvoker>(x => new PluginInvoker(x.GetRequiredService<IPluginLoader>(), x.GetRequiredService<ILoggerFactory>()));
         services.AddTransient<StoreCliDispatcher>(x => new StoreCliDispatcher(x.GetRequiredService<IAddonInstaller>(), x.GetRequiredService<IAddonSource>(), x.GetRequiredService<IRegistryManager>(), x.GetRequiredService<ITrustManager>(), x.GetRequiredService<ILogger<StoreCliDispatcher>>()));
         services.AddTransient<ExecutionCliDispatcher>(x => new ExecutionCliDispatcher(x.GetRequiredService<IPluginInvoker>(), x.GetRequiredService<ILogger<ExecutionCliDispatcher>>()));
-
+        
         services.AddStatelessCommandLineRunner();
-        services.AddTransient<DevCliDispatcher>(x => new DevCliDispatcher(x.GetRequiredService<IRegistryManager>(), x.GetRequiredService<IStatelessRunner>(), x.GetRequiredService<ILogger<DevCliDispatcher>>()));
+
+        // --- AUTO-REGISTER ALL CORE TOOLS ---
+        var coreToolType = typeof(ICoreTool);
+        var toolTypes = typeof(ICoreTool).Assembly.GetTypes()
+            .Where(t => coreToolType.IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract);
+
+        foreach (var type in toolTypes)
+        {
+            // Multiple registrations of `ICoreTool` creates `IEnumerable<ICoreTool>` for dependency injection
+            // Transient means a fresh instance is created every time the tool is invoked
+            services.AddTransient(coreToolType, type);
+        }
+
+        services.AddTransient<ToolCliDispatcher>(x => new ToolCliDispatcher(x.GetRequiredService<IEnumerable<ICoreTool>>(), x.GetRequiredService<ILogger<ToolCliDispatcher>>()));
     }
 
     private static void PrintHelp()
@@ -246,6 +267,7 @@ public class Program
         Console.WriteLine("  search <keyword>              Find new addons on GitHub.");
         Console.WriteLine("  list                          Show all currently installed addons.");
         Console.WriteLine("  install <Id | Number>         Install an addon (e.g., 'install 1' after search).");
+        Console.WriteLine("  update <Id | Number>          Update an installed addon to the latest version.");
         Console.WriteLine("  uninstall <Id | Number>       Remove an addon (e.g., 'uninstall 1' after list).");
         Console.WriteLine("  trust <Author>                Allow installation of an author's addons.");
         Console.WriteLine("  untrust <Author>              Revoke installation trust for an author.");

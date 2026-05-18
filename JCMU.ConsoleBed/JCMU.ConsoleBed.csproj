@@ -2,9 +2,9 @@
 
 	<PropertyGroup>
 		<AssemblyName>jcmu</AssemblyName>
-		<Version>1.1.2</Version>
-		<AssemblyVersion>1.1.2</AssemblyVersion>
-		<FileVersion>1.1.2</FileVersion>
+		<Version>1.3.0</Version>
+		<AssemblyVersion>1.3.0</AssemblyVersion>
+		<FileVersion>1.3.0</FileVersion>
 		<OutputType>Exe</OutputType>
 		<TargetFramework>net8.0</TargetFramework>
 		<LangVersion>12</LangVersion>
@@ -18,7 +18,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<ProjectReference Include="..\JCMU.AddonManager\JCMU.AddonManager.csproj" />
+		<ProjectReference Include="..\JCMU.CoreTools\JCMU.CoreTools.csproj" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -34,15 +34,15 @@
 	</ItemGroup>
 
 	<ItemGroup>
-	  <None Update="Icons\abort.ico">
-	    <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-	  </None>
-	  <None Update="Icons\backup.ico">
-	    <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-	  </None>
-	  <None Update="Icons\jinn.ico">
-	    <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-	  </None>
+		<Content Update="Icons\abort.ico">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</Content>
+		<Content Update="Icons\backup.ico">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</Content>
+		<Content Update="Icons\jinn.ico">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</Content>
 	</ItemGroup>
 
 </Project>

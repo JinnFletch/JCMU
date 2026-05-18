@@ -1,8 +1,6 @@
 ﻿using JinnDev.JCMU.AddonManager.Interfaces;
 using JinnDev.JCMU.AddonManager.Models;
 using JinnDev.JCMU.AddonManager.Security;
-using JinnDev.JCMU.ConsoleBed.Registry;
-using JinnDev.JCMU.SDK.Models;
 using JinnDev.Utilities.Monad;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
@@ -92,6 +90,60 @@ public class StoreCliDispatcher
         {
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine($"\n[FAILED] '{addonId}' failed during installation or registration:");
+            Console.WriteLine($"-> {result.Message}");
+        }
+
+        Console.ResetColor();
+        return result;
+    }
+
+    public async Task<Maybe> HandleUpdateAsync(string[] args, IReadOnlyList<string>? listCache)
+    {
+        if (args.Length < 2) return Maybe.Fail("Usage: jcmu update <AddonId|Number>");
+
+        var input = args[1];
+        var addonId = input;
+
+        // Resolve number from the 'list' cache
+        if (int.TryParse(input, out var index))
+        {
+            if (listCache == null || listCache.Count == 0)
+                return Maybe.Fail("Numeric updating only works immediately after running a 'list'.");
+
+            if (index < 1 || index > listCache.Count)
+                return Maybe.Fail($"Invalid index '{index}'. The last list only had {listCache.Count} results.");
+
+            addonId = listCache[index - 1];
+        }
+
+        Console.WriteLine($"\n--- Updating Addon: {addonId} [Latest] ---");
+
+        // Passing null for version tells the installer to grab the newest tag
+        var result = await _installer.InstallAsync(_source, addonId, null)
+            .BindAsync(async finalDirectory =>
+            {
+                var coreExePath = Process.GetCurrentProcess().MainModule?.FileName
+                                  ?? throw new Exception("Could not determine the executing Core EXE path.");
+
+                var manifestPath = Path.Combine(finalDirectory, "manifest.json");
+                var json = await File.ReadAllTextAsync(manifestPath).ConfigureAwait(false);
+                var manifest = System.Text.Json.JsonSerializer.Deserialize<PluginManifest>(json,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                               ?? throw new Exception("Failed to parse manifest.json during update.");
+
+                // Overwrite the registry keys in case the developer changed the menu structure
+                return _registryManager.RegisterAddon(addonId, manifest.Menu, coreExePath);
+            }).ConfigureAwait(false);
+
+        if (result.HasValue)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"\n[SUCCESS] '{addonId}' has been successfully updated to the latest version.");
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"\n[FAILED] '{addonId}' failed to update:");
             Console.WriteLine($"-> {result.Message}");
         }
 

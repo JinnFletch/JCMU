@@ -1,7 +1,9 @@
-﻿using System.Runtime.Versioning;
+﻿using JinnDev.JCMU.AddonManager.Interfaces;
 using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.JCMU.CoreTools;
 using JinnDev.Utilities.Monad;
 using Microsoft.Extensions.Logging;
+using System.Runtime.Versioning;
 using WinReg = Microsoft.Win32.Registry;
 
 namespace JinnDev.JCMU.ConsoleBed.Registry;
@@ -16,7 +18,7 @@ public class RegistryManager : IRegistryManager
         _logger = logger;
     }
 
-    public Maybe RegisterAddon(string addonId, MenuDefinition menu, string coreExePath)
+    public Maybe RegisterAddon(string addonId, MenuDefinition menu, string coreExePath, bool isCoreTool = false)
     {
         return Maybe.Try(() =>
         {
@@ -35,24 +37,32 @@ public class RegistryManager : IRegistryManager
             // Format the key name with Ordinal to ensure Windows sorts the menu correctly
             var rootKeyName = $"{menu.Ordinal:D3}_{addonId}";
 
-            WriteMenuNode(baseKey, rootKeyName, menu, coreExePath, addonId);
+            WriteMenuNode(baseKey, rootKeyName, menu, coreExePath, addonId, isCoreTool);
         });
     }
 
     // Creates the folder anchor on the fly if it doesn't exist
     private static string EnsureDynamicCategoryExists(string categoryName)
     {
-        // Sanitize the string to make a safe registry key name (e.g., "Git Tools" -> "GitTools")
         var safeKey = new string(categoryName.Where(char.IsLetterOrDigit).ToArray());
-        var categoryKeyName = $"JCMU_Category_{safeKey}";
 
-        // 1. Create the anchor in the Root menu
+        // Check if it's the Core Tools folder. If so, force it to the bottom with 'z_'
+        bool isCoreTools = categoryName.Equals("JCMU Tools", StringComparison.OrdinalIgnoreCase);
+        var categoryKeyName = isCoreTools ? "z_JCMUTools" : $"JCMU_Category_{safeKey}";
+
         using var rootStore = WinReg.CurrentUser.CreateSubKey(@"Software\Classes\JCMU_Menu\shell");
         using var anchorKey = rootStore.CreateSubKey(categoryKeyName);
+
         anchorKey.SetValue("MUIVerb", categoryName);
         anchorKey.SetValue("ExtendedSubCommandsKey", categoryKeyName);
 
-        // 2. Return the path to the backing store where the addon should actually be written
+        // Apply the special styling to the Core folder
+        if (isCoreTools)
+        {
+            anchorKey.SetValue("Icon", "imageres.dll,-114"); // Gear icon
+            anchorKey.SetValue("CommandFlags", 0x20, Microsoft.Win32.RegistryValueKind.DWord); // Horizontal Line
+        }
+
         var categoryBackingStore = $@"Software\Classes\{categoryKeyName}\shell";
         using var _ = WinReg.CurrentUser.CreateSubKey(categoryBackingStore);
 
@@ -125,7 +135,7 @@ public class RegistryManager : IRegistryManager
     /// <summary>
     /// Recursively walks the MenuDefinition to create nested registry structures.
     /// </summary>
-    private static void WriteMenuNode(Microsoft.Win32.RegistryKey parentKey, string keyName, MenuDefinition menu, string coreExePath, string addonId)
+    private static void WriteMenuNode(Microsoft.Win32.RegistryKey parentKey, string keyName, MenuDefinition menu, string coreExePath, string addonId, bool isCoreTool)
     {
         using var itemKey = parentKey.CreateSubKey(keyName);
         itemKey.SetValue("MUIVerb", menu.MenuItemName);
@@ -145,7 +155,7 @@ public class RegistryManager : IRegistryManager
             foreach (var child in menu.SubItems)
             {
                 var childKeyName = $"{child.Ordinal:D3}_{Guid.NewGuid():N}";
-                WriteMenuNode(subRootKey, childKeyName, child, coreExePath, addonId);
+                WriteMenuNode(subRootKey, childKeyName, child, coreExePath, addonId, isCoreTool);
             }
         }
         else
@@ -162,8 +172,12 @@ public class RegistryManager : IRegistryManager
                 targetExe = Path.Combine(directory, "jcmu-bg.exe");
             }
 
-            // Note: %V is the directory the user clicked on in Windows Explorer
-            var commandString = $"\"{targetExe}\" execute {addonId} \"%V\"";
+            var backgroundFlag = menu.RunInBackground ? " -b" : "";
+
+            // --- THE FIX ---
+            // If it's a core tool, use the 'tool' verb. Otherwise, use 'execute'.
+            var cliVerb = isCoreTool ? "tool" : "execute";
+            var commandString = $"\"{targetExe}\" {cliVerb} {addonId}{backgroundFlag} \"%V\"";
 
             cmdKey.SetValue("", commandString);
         }

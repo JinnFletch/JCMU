@@ -1,7 +1,7 @@
 ﻿using JinnDev.JCMU.AddonManager.Models;
 using JinnDev.Utilities.Monad;
 
-namespace JinnDev.JCMU.ConsoleBed.Registry;
+namespace JinnDev.JCMU.AddonManager.Interfaces;
 
 /// <summary>
 /// Abstracts Windows Registry operations for installing and uninstalling dynamic context menus.
@@ -15,7 +15,7 @@ public interface IRegistryManager
     /// <param name="menu">The menu structure defined by the addon.</param>
     /// <param name="coreExePath">The absolute path to JCMU.ConsoleBed.exe.</param>
     /// <returns>A monad representing the success or failure of the registry write.</returns>
-    Maybe RegisterAddon(string addonId, MenuDefinition menu, string coreExePath);
+    Maybe RegisterAddon(string addonId, MenuDefinition menu, string coreExePath, bool isCoreTool = false);
 
     /// <summary>
     /// Removes all registry keys associated with the specified addon.

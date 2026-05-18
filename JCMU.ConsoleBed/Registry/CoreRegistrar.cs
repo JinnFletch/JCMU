@@ -1,6 +1,8 @@
-﻿using System.Runtime.Versioning;
+﻿using JinnDev.JCMU.AddonManager.Interfaces;
+using JinnDev.JCMU.CoreTools;
 using JinnDev.Utilities.Monad;
 using Microsoft.Extensions.Logging;
+using System.Runtime.Versioning;
 using WinReg = Microsoft.Win32.Registry;
 
 namespace JinnDev.JCMU.ConsoleBed.Registry;
@@ -8,6 +10,8 @@ namespace JinnDev.JCMU.ConsoleBed.Registry;
 [SupportedOSPlatform("windows")]
 public class CoreRegistrar
 {
+    private readonly IRegistryManager _registryManager;
+    private readonly IEnumerable<ICoreTool> _coreTools;
     private readonly ILogger<CoreRegistrar> _logger;
 
     // The primary hook points in Windows Explorer
@@ -17,8 +21,10 @@ public class CoreRegistrar
         @"Software\Classes\Directory\shell"             // Right-click a folder icon
     };
 
-    public CoreRegistrar(ILogger<CoreRegistrar> logger)
+    public CoreRegistrar(IRegistryManager registryManager, IEnumerable<ICoreTool> coreTools, ILogger<CoreRegistrar> logger)
     {
+        _registryManager = registryManager;
+        _coreTools = coreTools;
         _logger = logger;
     }
 
@@ -35,10 +41,8 @@ public class CoreRegistrar
             var exeDirectory = Path.GetDirectoryName(Environment.ProcessPath) ?? "";
             var coreExePath = Environment.ProcessPath ?? throw new Exception("Cannot determine process path.");
             var iconPath = Path.Combine(exeDirectory, "Icons", "jinn.ico");
-
             var finalIconValue = File.Exists(iconPath) ? iconPath : "shell32.dll,-16764";
 
-            // 1. Create the primary UI Hooks in Explorer
             foreach (var hookPath in _explorerHookPaths)
             {
                 using var hookKey = WinReg.CurrentUser.CreateSubKey($@"{hookPath}\JCMU_Core");
@@ -47,20 +51,17 @@ public class CoreRegistrar
                 hookKey.SetValue("Icon", finalIconValue);
             }
 
-            // 2. Create the hidden backing store for the Root placement
             using var rootStore = WinReg.CurrentUser.CreateSubKey(@"Software\Classes\JCMU_Menu\shell");
 
-            // 3. Bake in the Permanent "Search for Addons" Menu Item
-            // Change "999_" to "z_" to ensure it sorts after "JCMU_Category_..."
-            using var searchItemKey = rootStore.CreateSubKey("z_SearchAddons");
-            searchItemKey.SetValue("MUIVerb", "Search for Addons...");
-            searchItemKey.SetValue("Icon", "imageres.dll,-177");
+            // Automatically write all injected Core Tools!
+            foreach (var tool in _coreTools)
+            {
+                var modifiedMenu = tool.Menu with { Category = "JCMU Tools" };
+                var result = _registryManager.RegisterAddon(tool.ToolId, modifiedMenu, coreExePath, isCoreTool: true);
 
-            // This flag 0x20 is what creates that Horizontal Rule (Separator)
-            searchItemKey.SetValue("CommandFlags", 0x20, Microsoft.Win32.RegistryValueKind.DWord);
-
-            using var searchCmdKey = searchItemKey.CreateSubKey("command");
-            searchCmdKey.SetValue("", $"\"{coreExePath}\" -i search");
+                if (!result.HasValue)
+                    _logger.LogWarning("Failed to register built-in tool {ToolId}: {Message}", tool.ToolId, result.Message);
+            }
 
             _logger.LogInformation("Core registry initialization successful.");
         });
@@ -89,6 +90,8 @@ public class CoreRegistrar
             {
                 // Delete the root
                 classesKey.DeleteSubKeyTree("JCMU_Menu", throwOnMissingSubKey: false);
+
+                classesKey.DeleteSubKeyTree("JCMU_Tools", throwOnMissingSubKey: false);
 
                 // Delete all dynamic categories created by addons
                 var dynamicKeys = classesKey.GetSubKeyNames()

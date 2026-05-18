@@ -1,0 +1,25 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<SupportedOSPlatform>windows</SupportedOSPlatform>
+		<LangVersion>12</LangVersion>
+		<RootNamespace>JinnDev.$(MSBuildProjectName.Replace(" ", "_"))</RootNamespace>
+		<AssemblyName>JinnDev.$(MSBuildProjectName.Replace(" ", "_"))</AssemblyName>
+		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Authors>JinnDev</Authors>
+		<Company>Jinn Studios</Company>
+		<Product>Jinn Context Menu Utility Addon Manager</Product>
+		<Nullable>enable</Nullable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\JCMU.AddonManager\JCMU.AddonManager.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="JinnDev.Utilities.CommandLine" Version="8.0.1" />
+	</ItemGroup>
+
+</Project>
