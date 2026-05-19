@@ -38,6 +38,7 @@ public class PublishTool : ICoreTool
             .BindAsync(EnsureGitHubTopicAsync)
             .BindAsync(CheckExistingReleaseAsync)
             .BindAsync(PromptForVersionOverrideAsync)
+            .BindAsync(SyncManifestVersionAsync)
             .BindAsync(EnsureGitIntegrityAsync)
             .BindAsync(ExecuteDotnetBuildAsync)
             .BindAsync(CreateGitHubReleaseAsync)
@@ -227,13 +228,47 @@ public class PublishTool : ICoreTool
             return Maybe.None<PublishContext>("Could not extract <Version> from the .csproj. Ensure the project explicitly defines a version.");
         }
 
-        var extractedVersion = match.Groups[1].Value.Trim();
+        var csprojVersion = match.Groups[1].Value.Trim();
+        var manifestVersion = ctx.Manifest!.Version;
 
         Console.WriteLine($"[Valid] Project: {Path.GetFileName(ctx.ProjectFilePath)}");
-        Console.WriteLine($"[Valid] AddonId: {ctx.Manifest!.AddonId}");
-        Console.WriteLine($"[Valid] Version: {extractedVersion}");
+        Console.WriteLine($"[Valid] AddonId: {ctx.Manifest.AddonId}");
 
-        return Maybe.Some(ctx with { InitialVersion = extractedVersion, FinalVersion = extractedVersion });
+        if (csprojVersion.Equals(manifestVersion, StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"[Valid] Version: {csprojVersion} (Synchronized)");
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"[WARNING] Version Mismatch! CSPROJ: {csprojVersion} | MANIFEST: {manifestVersion}");
+            Console.ResetColor();
+        }
+
+        // We treat csproj as the primary source of truth for the initial prompt
+        return Maybe.Some(ctx with { InitialVersion = csprojVersion, FinalVersion = csprojVersion });
+    }
+
+    private async Task<Maybe<PublishContext>> SyncManifestVersionAsync(PublishContext ctx)
+    {
+        if (ctx.FinalVersion.Equals(ctx.Manifest!.Version, StringComparison.OrdinalIgnoreCase))
+        {
+            return Maybe.Some(ctx); // Already in sync, do nothing
+        }
+
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine($"\n[INFO] Updating manifest.json version to '{ctx.FinalVersion}'...");
+        Console.ResetColor();
+
+        // Create a new manifest record with the updated version
+        var updatedManifest = ctx.Manifest with { Version = ctx.FinalVersion };
+
+        // Serialize and write back to disk
+        var options = new JsonSerializerOptions { WriteIndented = true };
+        var newJson = JsonSerializer.Serialize(updatedManifest, options);
+        await File.WriteAllTextAsync(ctx.ManifestFilePath, newJson).ConfigureAwait(false);
+
+        return Maybe.Some(ctx with { Manifest = updatedManifest });
     }
 
     private Task<Maybe<PublishContext>> PromptForVersionOverrideAsync(PublishContext ctx)
