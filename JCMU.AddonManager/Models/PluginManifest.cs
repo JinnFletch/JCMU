@@ -62,6 +62,12 @@ public record PluginManifest
         if (!Regex.IsMatch(AddonId, @"^[a-zA-Z0-9\.\-_]+$"))
             return Maybe.Fail("AddonId can only contain letters, numbers, periods, hyphens, and underscores. No spaces.");
 
+        if (string.IsNullOrWhiteSpace(Author))
+            return Maybe.Fail("Author cannot be null or whitespace.");
+
+        if (!Regex.IsMatch(Author, @"^[a-zA-Z0-9\-_]+$"))
+            return Maybe.Fail("Author can only contain letters, numbers, hyphens, and underscores. No spaces or special characters.");
+
         if (string.IsNullOrWhiteSpace(DisplayName))
             return Maybe.Fail("DisplayName cannot be null or whitespace.");
 

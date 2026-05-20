@@ -53,26 +53,37 @@ public class PluginLoader : IPluginLoader
     /// </summary>
     private static string GetPluginDllPath(string addonId)
     {
-        var targetDirectory = Path.Combine(
+        var pluginsBase = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "JCMU", "Plugins", addonId);
+            "JCMU", "Plugins");
 
-        if (!Directory.Exists(targetDirectory))
-        {
-            throw new DirectoryNotFoundException($"Addon '{addonId}' is not installed (Directory not found).");
-        }
+        if (!Directory.Exists(pluginsBase))
+            throw new DirectoryNotFoundException($"Addon '{addonId}' is not installed (Plugins directory not found).");
 
-        // The AddonBuilder in Phase 2 should have produced a DLL named after the AddonId or the csproj.
-        // We look for any .dll that might contain the Addon logic.
+        // Search across the 2-tier structure
+        var targetDirectories = Directory.GetDirectories(pluginsBase)
+            .SelectMany(authorDir => Directory.GetDirectories(authorDir))
+            .Where(addonDir => Path.GetFileName(addonDir).Equals(addonId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        // Legacy fallback
+        var legacyPath = Path.Combine(pluginsBase, addonId);
+        if (Directory.Exists(legacyPath) && !targetDirectories.Contains(legacyPath))
+            targetDirectories.Add(legacyPath);
+
+        if (targetDirectories.Count == 0)
+            throw new DirectoryNotFoundException($"Addon '{addonId}' is not installed.");
+
+        if (targetDirectories.Count > 1)
+            throw new Exception($"Ambiguous execution: Multiple addons found with ID '{addonId}' by different authors. " +
+                                $"This indicates a hijacking attempt or an unclean uninstall. Please inspect your Plugins directory.");
+
+        var targetDirectory = targetDirectories[0];
+
         var dllFiles = Directory.GetFiles(targetDirectory, "*.dll");
-
         if (dllFiles.Length == 0)
-        {
             throw new FileNotFoundException($"No compiled .dll files found in {targetDirectory}.");
-        }
 
-        // Heuristic: Prefer a DLL whose name matches the AddonId, otherwise just grab the first one
-        // and let Reflection figure out if it contains the IJcmuAddon interface.
         var primaryDll = dllFiles.FirstOrDefault(f => Path.GetFileNameWithoutExtension(f).Equals(addonId, StringComparison.OrdinalIgnoreCase))
                          ?? dllFiles[0];
 

@@ -226,19 +226,25 @@ public class StoreCliDispatcher
                 var addonDir = Path.GetDirectoryName(manifestPath);
                 if (addonDir == null) continue;
 
-                var relativeId = Path.GetRelativePath(pluginsBase, addonDir).Replace('\\', '/');
-                results.Add(relativeId);
-
                 var json = File.ReadAllText(manifestPath);
-                var manifest = System.Text.Json.JsonSerializer.Deserialize<PluginManifest>(json);
+                var manifest = System.Text.Json.JsonSerializer.Deserialize<PluginManifest>(
+                    json, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
-                // --- NEW SYMLINK DETECTION ---
+                var addonId = manifest?.AddonId ?? new DirectoryInfo(addonDir).Name;
+                var author = manifest?.Author ?? "Unknown";
+
+                // Cache ONLY the strict AddonId so index-based commands (update/uninstall) resolve properly
+                results.Add(addonId);
+
+                // Display Author/AddonId cleanly to the user
+                var displayString = $"{author}/{addonId}";
+
                 var dirInfo = new DirectoryInfo(addonDir);
-                if (dirInfo.LinkTarget != null) // .NET 6+ detects Junctions and Symlinks natively!
+                if (dirInfo.LinkTarget != null)
                 {
                     bool isBroken = !Directory.Exists(dirInfo.LinkTarget);
 
-                    Console.Write($"[{results.Count}] {relativeId} ");
+                    Console.Write($"[{results.Count}] {displayString} ");
 
                     if (isBroken)
                     {
@@ -257,15 +263,14 @@ public class StoreCliDispatcher
                 }
                 else
                 {
-                    // Standard Output for normal installs
-                    Console.WriteLine($"[{results.Count}] {relativeId}");
+                    Console.WriteLine($"[{results.Count}] {displayString}");
                     if (manifest != null && !string.IsNullOrWhiteSpace(manifest.RepositoryUrl))
                         Console.WriteLine($"    {manifest.RepositoryUrl}");
                     else
                         Console.WriteLine("    (No repository URL provided in manifest)");
                 }
 
-                Console.WriteLine(); // Blank line for spacing
+                Console.WriteLine();
             }
 
             onResultsFound(results);
@@ -312,6 +317,62 @@ public class StoreCliDispatcher
                 return;
             }
 
+            // --- LOCAL STATE DISCOVERY ---
+            var pluginsBase = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "JCMU", "Plugins");
+
+            var localInstallations = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            if (Directory.Exists(pluginsBase))
+            {
+                // Search recursively to catch both legacy (1-tier) and new (2-tier) installations
+                var manifests = Directory.GetFiles(pluginsBase, "manifest.json", SearchOption.AllDirectories);
+                foreach (var manifestPath in manifests)
+                {
+                    var dir = Path.GetDirectoryName(manifestPath);
+                    if (dir == null) continue;
+
+                    string? localAuthor = null;
+                    string? localAddonId = null;
+                    string versionSuffix = "";
+
+                    try
+                    {
+                        var json = File.ReadAllText(manifestPath);
+                        var manifest = System.Text.Json.JsonSerializer.Deserialize<PluginManifest>(
+                            json, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+                        if (manifest != null)
+                        {
+                            localAuthor = manifest.Author;
+                            localAddonId = manifest.AddonId;
+                            if (!string.IsNullOrWhiteSpace(manifest.Version))
+                                versionSuffix = $" {manifest.Version}";
+                        }
+                    }
+                    catch { /* Ignore parse errors */ }
+
+                    // Fallbacks in case manifest is corrupted
+                    if (string.IsNullOrWhiteSpace(localAddonId)) localAddonId = new DirectoryInfo(dir).Name;
+                    if (string.IsNullOrWhiteSpace(localAuthor)) localAuthor = "Unknown";
+
+                    var compositeKey = $"{localAuthor}/{localAddonId}";
+                    var dirInfo = new DirectoryInfo(dir);
+
+                    if (dirInfo.LinkTarget != null) // Native .NET 6+ Junction/Symlink check
+                    {
+                        bool isBroken = !Directory.Exists(dirInfo.LinkTarget);
+                        localInstallations[compositeKey] = isBroken ? $"BROKEN DEV-LINK{versionSuffix}" : $"DEV-LINKED{versionSuffix}";
+                    }
+                    else
+                    {
+                        localInstallations[compositeKey] = $"INSTALLED{versionSuffix}";
+                    }
+                }
+            }
+            // -----------------------------
+
             int startIndex = (page - 1) * 10 + 1;
 
             for (int i = 0; i < list.Count; i++)
@@ -321,20 +382,45 @@ public class StoreCliDispatcher
 
                 bool isTrusted = _trustManager.IsTrusted(list[i].Author);
 
-                Console.Write($"[{displayNum}] {list[i].AddonId} ");
+                Console.Write($"[{displayNum}] {list[i].Author}/{list[i].AddonId} ");
 
                 // Print Trust Tag
                 if (isTrusted)
                 {
                     Console.ForegroundColor = ConsoleColor.Green;
-                    Console.WriteLine("[TRUSTED]");
+                    Console.Write("[TRUSTED]");
                 }
                 else
                 {
                     Console.ForegroundColor = ConsoleColor.DarkYellow;
-                    Console.WriteLine("[UNTRUSTED]");
+                    Console.Write("[UNTRUSTED]");
                 }
+
+                // Print Installation Status Tag
+                var lookupKey = $"{list[i].Author}/{list[i].AddonId}";
+                if (localInstallations.TryGetValue(lookupKey, out var installStatus))
+                {
+                    Console.Write(" "); // Space between tags
+
+                    if (installStatus.StartsWith("INSTALLED"))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Cyan;
+                        Console.Write($"[{installStatus}]");
+                    }
+                    else if (installStatus.StartsWith("DEV-LINKED"))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Magenta;
+                        Console.Write($"[{installStatus}]");
+                    }
+                    else
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.Write($"[{installStatus}]");
+                    }
+                }
+
                 Console.ResetColor();
+                Console.WriteLine(); // Move to the next line for the URL
 
                 // Print the clickable URL
                 Console.WriteLine($"    {list[i].RepositoryUrl}");

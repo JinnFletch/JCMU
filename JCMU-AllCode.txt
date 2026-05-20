@@ -1,0 +1,3826 @@
+
+
+ *****************
+JCMU.slnx
+ *****************
+
+
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path=".github/workflows/build-installer.yml" />
+    <File Path=".gitignore" />
+    <File Path="JCMU_Installer.iss" />
+    <File Path="Local-Install.bat" />
+    <File Path="readme.md" />
+  </Folder>
+  <Project Path="JCMU.AddonManager/JCMU.AddonManager.csproj" />
+  <Project Path="JCMU.ConsoleBed/JCMU.ConsoleBed.csproj" Id="794e6201-caeb-4816-8930-c04a40a15405" />
+  <Project Path="JCMU.CoreTools/JCMU.CoreTools.csproj" Id="a7d18b63-0703-46c5-a45c-714ea8abd086" />
+  <Project Path="JCMU.HiddenBed/JCMU.HiddenBed.csproj" Id="84983e63-3f38-444b-a69d-7cd834c79c3f" />
+</Solution>
+
+
+ *****************
+JCMU.AddonManager/JCMU.AddonManager.csproj
+ *****************
+
+
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<LangVersion>12</LangVersion>
+		<RootNamespace>JinnDev.$(MSBuildProjectName.Replace(" ", "_"))</RootNamespace>
+		<AssemblyName>JinnDev.$(MSBuildProjectName.Replace(" ", "_"))</AssemblyName>
+		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Authors>JinnDev</Authors>
+		<Company>Jinn Studios</Company>
+		<Product>Jinn Context Menu Utility Addon Manager</Product>
+		<Nullable>enable</Nullable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="JinnDev.Utilities.Monad" Version="10.0.6" />
+		<PackageReference Include="JinnDev.JCMU.SDK" Version="1.1.2" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.3" />
+	</ItemGroup>
+
+</Project>
+
+ *****************
+JCMU.AddonManager/Builders/DotNetAddonBuilder.cs
+ *****************
+
+
+using JinnDev.JCMU.AddonManager.Interfaces;
+using JinnDev.JCMU.AddonManager.Utilities;
+using JinnDev.Utilities.Monad;
+
+namespace JinnDev.JCMU.AddonManager.Builders;
+
+/// <summary>
+/// Compiles raw JCMU Addon source code into deployable binaries using the local .NET SDK.
+/// </summary>
+public class DotNetAddonBuilder : IAddonBuilder
+{
+    public async Task<Maybe> BuildPluginAsync(string sourceDirectory, string publishDirectory)
+    {
+        if (!Directory.Exists(sourceDirectory))
+            return Maybe.Fail($"Source directory does not exist: {sourceDirectory}");
+
+        return await LocateProjectFile(sourceDirectory)
+            .BindAsync(csProjFile =>
+            {
+                var arguments = new[] { "publish", csProjFile, "-c", "Release", "-o", publishDirectory };
+                return CliRunner.RunAsync("dotnet", arguments);
+            })
+            .BindAsync(cliOutput => VerifyPublishDirectory(publishDirectory))
+            .BindAsync(_ => Maybe.SUCCESS)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Recursively searches the source directory for a single .csproj file.
+    /// </summary>
+    private static Maybe<string> LocateProjectFile(string rootDirectory)
+    {
+        var projectFiles = Directory.GetFiles(rootDirectory, "*.csproj", SearchOption.AllDirectories);
+
+        if (projectFiles.Length == 0)
+            return Maybe.None<string>("No .csproj file found in the repository.");
+
+        if (projectFiles.Length > 1)
+        {
+            var preferred = projectFiles.FirstOrDefault(f => 
+                f.Contains("Addon", StringComparison.OrdinalIgnoreCase) || 
+                f.Contains("Plugin", StringComparison.OrdinalIgnoreCase));
+
+            if (preferred != null) 
+                return preferred;
+            
+            return Maybe.None<string>($"Multiple .csproj files found. Unable to determine the primary project: {string.Join(", ", projectFiles)}");
+        }
+
+        return projectFiles[0];
+    }
+
+    /// <summary>
+    /// Verifies the dotnet publish command actually yielded the expected compiled output.
+    /// </summary>
+    private static Maybe<string> VerifyPublishDirectory(string publishDirectory)
+    {
+        if (!Directory.Exists(publishDirectory) || !Directory.EnumerateFiles(publishDirectory, "*.dll").Any())
+            return Maybe.None<string>("Compilation succeeded, but no DLLs were found in the output directory.");
+
+        return publishDirectory;
+    }
+}
+
+ *****************
+JCMU.AddonManager/Installers/AddonInstaller.cs
+ *****************
+
+
+using JinnDev.JCMU.AddonManager.Interfaces;
+using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.JCMU.AddonManager.Security;
+using JinnDev.JCMU.AddonManager.Utilities;
+using JinnDev.Utilities.Monad;
+using Microsoft.Extensions.Logging;
+
+namespace JinnDev.JCMU.AddonManager.Installers;
+
+/// <summary>
+/// The primary orchestrator responsible for the full installation pipeline of a JCMU Addon.
+/// </summary>
+public class AddonInstaller : IAddonInstaller
+{
+    private readonly IAddonBuilder _builder;
+    private readonly ITrustManager _trustManager;
+    private readonly ILogger<AddonInstaller> _logger;
+
+    public AddonInstaller(IAddonBuilder builder, ITrustManager trustManager, ILogger<AddonInstaller> logger)
+    {
+        _builder = builder;
+        _trustManager = trustManager;
+        _logger = logger;
+    }
+
+    public async Task<Maybe<string>> InstallAsync(IAddonSource source, string addonId, string? version = null)
+    {
+        _logger.LogInformation("Beginning installation pipeline for '{AddonId}'...", addonId);
+
+        // Phase 1: Context Building (Network & Setup)
+        return await DetermineInstallContextAsync(source, addonId, version)
+            .BindAsync(FileSystemManager.PrepareTempDirectoriesAsync)
+
+            // Phase 2: Acquisition & Compilation (Git & DotNet)
+            .BindAsync(ctx => source.DownloadSourceAsync(ctx.RepositoryUrl, ctx.SelectedVersion, ctx.TempCloneDirectory).WithValueAsync(ctx))
+            .BindAsync(ctx => _builder.BuildPluginAsync(ctx.TempCloneDirectory, ctx.TempPublishDirectory).WithValueAsync(ctx))
+
+            // Phase 3: Validation & Deployment (Disk I/O)
+            .BindAsync(FileSystemManager.ValidateCompiledManifestAsync)
+            .BindAsync(FileSystemManager.MoveToFinalDestinationAsync)
+
+            .TapAsync(
+                someActionAsync: async ctx =>
+                {
+                    _logger.LogInformation("Successfully installed {AddonId} v{Version}.", ctx.TargetAddonId, ctx.SelectedVersion);
+                    await FileSystemManager.CleanupTempDirectoriesAsync(ctx).ConfigureAwait(false);
+                },
+                noneActionAsync: async none => _logger.LogError(none.Exception, "Installation failed: {Message}", none.Message)
+            )
+
+            // MAP the Context to the final directory string so the Core can use it
+            .MapAsync(ctx => ctx.FinalPluginDirectory)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<Maybe> UninstallAsync(string addonId)
+    {
+        return await Maybe.TryAsync(async () =>
+        {
+            _logger.LogInformation("Attempting to uninstall '{AddonId}'...", addonId);
+
+            var targetDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "JCMU", "Plugins", addonId);
+
+            if (Directory.Exists(targetDirectory))
+            {
+                Directory.Delete(targetDirectory, true);
+                _logger.LogInformation("Successfully deleted addon files.");
+
+                var parent = Path.GetDirectoryName(targetDirectory);
+                while (parent != null &&
+                       !parent.EndsWith("Plugins", StringComparison.OrdinalIgnoreCase) &&
+                       Directory.Exists(parent) &&
+                       !Directory.EnumerateFileSystemEntries(parent).Any())
+                {
+                    Directory.Delete(parent);
+                    parent = Path.GetDirectoryName(parent);
+                }
+            }
+            else
+            {
+                _logger.LogWarning("Addon directory not found: {Path}", targetDirectory);
+            }
+
+            // Delete the configuration and secrets ---
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var configFilePath = Path.Combine(localAppData, "JCMU", "Configs", $"{addonId}.json");
+
+            if (File.Exists(configFilePath))
+            {
+                File.Delete(configFilePath);
+                _logger.LogInformation("Successfully deleted addon configuration and secrets.");
+            }
+        }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reaches out to the source to find the repository URL and resolve the correct version tag.
+    /// </summary>
+    private async Task<Maybe<InstallContext>> DetermineInstallContextAsync(IAddonSource source, string addonId, string? targetVersion)
+    {
+        return await source.SearchAsync(addonId)
+            .BindAsync(results =>
+            {
+                var match = results.Items.FirstOrDefault(r => r.AddonId.Equals(addonId, StringComparison.OrdinalIgnoreCase));
+                if (match == null) return Maybe.None<AddonSearchResult>($"Could not find an addon matching ID: {addonId}");
+
+                // SECURITY ENFORCEMENT
+                if (!_trustManager.IsTrusted(match.Author))
+                {
+                    return Maybe.None<AddonSearchResult>($"Installation blocked: Author '{match.Author}' is not trusted.\nRun 'jcmu trust {match.Author}' to allow installation.");
+                }
+
+                return Maybe.Some(match);
+            })
+            .BindAsync(match => source.GetVersionsAsync(match.RepositoryUrl)
+                .BindAsync(versions =>
+                {
+                    if (versions.Count == 0) return Maybe.None<InstallContext>("Repository found, but it has no tags/releases.");
+
+                    var selected = string.IsNullOrWhiteSpace(targetVersion)
+                        ? versions.OrderByDescending(v => v.VersionName).First()
+                        : versions.FirstOrDefault(v => v.VersionName.Equals(targetVersion, StringComparison.OrdinalIgnoreCase));
+
+                    if (selected == null) return Maybe.None<InstallContext>($"Version '{targetVersion}' not found.");
+
+                    return Maybe.Some(FileSystemManager.CreateInstallContext(match.AddonId, selected.VersionName, match.RepositoryUrl));
+                })
+            ).ConfigureAwait(false);
+    }
+}
+
+ *****************
+JCMU.AddonManager/Interfaces/IAddonBuilder.cs
+ *****************
+
+
+using JinnDev.Utilities.Monad;
+
+namespace JinnDev.JCMU.AddonManager.Interfaces;
+
+/// <summary>
+/// Responsible for compiling raw C# source code into a secure, ready-to-load JCMU Addon.
+/// </summary>
+public interface IAddonBuilder
+{
+    /// <summary>
+    /// Locates the .csproj in the source directory and executes 'dotnet publish' in Release mode.
+    /// </summary>
+    /// <param name="sourceDirectory">The directory containing the downloaded raw source code.</param>
+    /// <param name="publishDirectory">The directory where the compiled binaries should be written.</param>
+    /// <returns>A monad containing the absolute path to the compiled output directory.</returns>
+    Task<Maybe> BuildPluginAsync(string sourceDirectory, string publishDirectory);
+}
+
+
+ *****************
+JCMU.AddonManager/Interfaces/IAddonInstaller.cs
+ *****************
+
+
+using JinnDev.Utilities.Monad;
+
+namespace JinnDev.JCMU.AddonManager.Interfaces;
+
+/// <summary>
+/// The primary orchestrator that glues the Source and Builder together to execute user commands.
+/// </summary>
+public interface IAddonInstaller
+{
+    /// <summary>
+    /// Executes the full pipeline: Downloads source, compiles it, validates the manifest, 
+    /// and moves the final binaries to the protected Plugin directory.
+    /// </summary>
+    /// <param name="source">The source provider to pull the code from.</param>
+    /// <param name="addonId">The requested addon identifier.</param>
+    /// <param name="version">The requested version (or "latest" if null).</param>
+    /// <returns>A monad containing the absolute path to the installed plugin directory.</returns>
+    Task<Maybe<string>> InstallAsync(IAddonSource source, string addonId, string? version = null);
+
+    /// <summary>
+    /// Safely removes an installed addon from the local filesystem and unregisters its context menus.
+    /// </summary>
+    /// <param name="addonId">The identifier of the addon to remove.</param>
+    /// <returns>A parameterless monad representing the success or failure of the uninstallation.</returns>
+    Task<Maybe> UninstallAsync(string addonId);
+}
+
+ *****************
+JCMU.AddonManager/Interfaces/IAddonSource.cs
+ *****************
+
+
+using JinnDev.Utilities.Monad;
+using JinnDev.JCMU.AddonManager.Models;
+
+namespace JinnDev.JCMU.AddonManager.Interfaces;
+
+/// <summary>
+/// Defines a remote registry or "Store" where JCMU Addons can be discovered and downloaded.
+/// </summary>
+public interface IAddonSource
+{
+    /// <summary>
+    /// Searches the remote source for addons matching the query.
+    /// </summary>
+    /// <param name="query">The search term provided by the user.</param>
+    /// <param name="page">In case of manu search results, which page number to find</param>
+    /// <returns>A monad containing a list of search results, or a failure if the network/API call fails.</returns>
+    Task<Maybe<AddonPagedResult>> SearchAsync(string? query, int page = 1);
+
+    /// <summary>
+    /// Retrieves all available versions (tags) for a specific addon repository.
+    /// </summary>
+    /// <param name="repositoryUrl">The Git URL of the addon.</param>
+    /// <returns>A monad containing the list of available versions.</returns>
+    Task<Maybe<IReadOnlyList<AddonVersionInfo>>> GetVersionsAsync(string repositoryUrl);
+
+    /// <summary>
+    /// Executes a Git Clone to pull the specific version of the source code to the local disk.
+    /// </summary>
+    /// <param name="repositoryUrl">The Git URL to clone.</param>
+    /// <param name="version">The specific tag or branch to checkout.</param>
+    /// <param name="targetTempPath">The local directory to clone the code into.</param>
+    /// <returns>A monad containing the absolute path to the downloaded source directory.</returns>
+    Task<Maybe> DownloadSourceAsync(string repositoryUrl, string version, string targetTempPath);
+}
+
+
+ *****************
+JCMU.AddonManager/Interfaces/IRegistryManager.cs
+ *****************
+
+
+using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.Utilities.Monad;
+
+namespace JinnDev.JCMU.AddonManager.Interfaces;
+
+/// <summary>
+/// Abstracts Windows Registry operations for installing and uninstalling dynamic context menus.
+/// </summary>
+public interface IRegistryManager
+{
+    /// <summary>
+    /// Translates a MenuDefinition into Windows Registry keys to create a static context menu.
+    /// </summary>
+    /// <param name="addonId">The unique identifier of the addon.</param>
+    /// <param name="menu">The menu structure defined by the addon.</param>
+    /// <param name="coreExePath">The absolute path to JCMU.ConsoleBed.exe.</param>
+    /// <returns>A monad representing the success or failure of the registry write.</returns>
+    Maybe RegisterAddon(string addonId, MenuDefinition menu, string coreExePath, bool isCoreTool = false);
+
+    /// <summary>
+    /// Removes all registry keys associated with the specified addon.
+    /// </summary>
+    /// <param name="addonId">The unique identifier of the addon.</param>
+    /// <returns>A monad representing the success or failure of the registry cleanup.</returns>
+    Maybe UnregisterAddon(string addonId);
+}
+
+ *****************
+JCMU.AddonManager/Models/AddonPagedResult.cs
+ *****************
+
+
+namespace JinnDev.JCMU.AddonManager.Models;
+
+public record AddonPagedResult(
+    IReadOnlyList<AddonSearchResult> Items,
+    int TotalCount
+);
+
+ *****************
+JCMU.AddonManager/Models/AddonSearchResult.cs
+ *****************
+
+
+namespace JinnDev.JCMU.AddonManager.Models;
+
+/// <summary>
+/// Represents a high-level overview of an addon found in a remote source repository.
+/// </summary>
+public record AddonSearchResult
+{
+    /// <summary>
+    /// The unique identifier of the addon (e.g., "JCMU.CleanVSBS").
+    /// </summary>
+    public required string AddonId { get; init; }
+
+    /// <summary>
+    /// The Git repository URL where the source code is hosted.
+    /// </summary>
+    public required string RepositoryUrl { get; init; }
+
+    /// <summary>
+    /// A brief explanation of the addon's functionality.
+    /// </summary>
+    public string? Description { get; init; }
+
+    /// <summary>
+    /// The author or organization that published the addon.
+    /// </summary>
+    public string? Author { get; init; }
+
+    /// <summary>
+    /// Categories or keywords associated with the addon for easier searching.
+    /// </summary>
+    public IReadOnlyList<string> Tags { get; init; } = Array.Empty<string>();
+}
+
+
+ *****************
+JCMU.AddonManager/Models/AddonVersionInfo.cs
+ *****************
+
+
+namespace JinnDev.JCMU.AddonManager.Models;
+
+/// <summary>
+/// Represents a specific version (Git Tag/Release) of an addon.
+/// </summary>
+public record AddonVersionInfo
+{
+    /// <summary>
+    /// The semantic version string (e.g., "v1.0.4").
+    /// </summary>
+    public required string VersionName { get; init; }
+
+    /// <summary>
+    /// The specific Git commit hash tied to this version, ensuring immutability.
+    /// </summary>
+    public required string CommitHash { get; init; }
+
+    /// <summary>
+    /// Indicates if this version is a beta/pre-release.
+    /// </summary>
+    public bool IsPreRelease { get; init; }
+}
+
+
+ *****************
+JCMU.AddonManager/Models/InstallContext.cs
+ *****************
+
+
+namespace JinnDev.JCMU.AddonManager.Models;
+
+/// <summary>
+/// The state object passed down the monadic pipeline during the installation process.
+/// </summary>
+public record InstallContext
+{
+    /// <summary>
+    /// The unique identifier of the addon being installed.
+    /// </summary>
+    public required string TargetAddonId { get; init; }
+
+    /// <summary>
+    /// The specific version being pulled.
+    /// </summary>
+    public required string SelectedVersion { get; init; }
+
+    /// <summary>
+    /// The Git URL to clone from.
+    /// </summary>
+    public required string RepositoryUrl { get; init; }
+
+    /// <summary>
+    /// The absolute path where the raw source code will be temporarily cloned.
+    /// </summary>
+    public required string TempCloneDirectory { get; init; }
+
+    /// <summary>
+    /// The absolute path where 'dotnet publish' will output the compiled DLLs temporarily.
+    /// </summary>
+    public required string TempPublishDirectory { get; init; }
+
+    /// <summary>
+    /// The final, secure absolute path (e.g., in ProgramData) where the compiled addon will reside.
+    /// </summary>
+    public required string FinalPluginDirectory { get; init; }
+}
+
+
+ *****************
+JCMU.AddonManager/Models/MenuDefinition.cs
+ *****************
+
+
+using JinnDev.Utilities.Monad;
+
+namespace JinnDev.JCMU.AddonManager.Models;
+
+/// <summary>
+/// Defines the static configuration for how the addon should be registered in the Windows Context Menu.
+/// </summary>
+public record MenuDefinition
+{
+    /// <summary>
+    /// The text displayed to the user in the right-click menu.
+    /// </summary>
+    public required string MenuItemName { get; init; }
+
+    /// <summary>
+    /// An optional absolute path to an .ico file to display next to the menu item.
+    /// </summary>
+    public string? IconPath { get; init; }
+
+    /// <summary>
+    /// Determines the sorting order of this item relative to other items in the same menu.
+    /// Lower numbers appear higher in the list.
+    /// </summary>
+    public required int Ordinal { get; init; }
+
+    /// <summary>
+    /// The name of the sub-menu folder this item should be grouped into (e.g., "Docker Tools").
+    /// If null, the item is placed directly in the main root menu.
+    /// </summary>
+    public string? Category { get; init; }
+
+    /// <summary>
+    /// Optional child menus. If populated, clicking this item will expand a sub-menu 
+    /// instead of immediately executing logic.
+    /// </summary>
+    public IEnumerable<MenuDefinition>? SubItems { get; init; }
+
+    /// <summary>
+    /// If true, the JCMU Core will execute this addon in the background without 
+    /// showing a console window. If false, a console window will appear.
+    /// </summary>
+    public bool RunInBackground { get; init; } = false;
+
+    /// <summary>
+    /// Validates the menu definition and its sub-items recursively.
+    /// </summary>
+    /// <returns>A parameterless monad representing the validation result.</returns>
+    public Maybe Validate()
+    {
+        if (string.IsNullOrWhiteSpace(MenuItemName))
+            return Maybe.Fail("MenuItemName cannot be null or whitespace.");
+
+        // Ensure categories don't have crazy characters that break the Registry
+        if (!string.IsNullOrWhiteSpace(Category) && Category.Any(c => !char.IsLetterOrDigit(c) && c != ' '))
+            return Maybe.Fail("Category names must contain only letters, numbers, and spaces.");
+
+        if (SubItems == null || !SubItems.Any())
+            return Maybe.SUCCESS;
+
+        // Evaluates all validations and returns a single Success Maybe 
+        // ONLY if every item in the sequence succeeded. 
+        // (If one fails, Sequence() returns that specific failure).
+        return SubItems
+            .Select(sub => sub.Validate())
+            .Sequence();
+    }
+}
+
+
+ *****************
+JCMU.AddonManager/Models/PluginManifest.cs
+ *****************
+
+
+using JinnDev.Utilities.Monad;
+using System.Text.RegularExpressions;
+
+namespace JinnDev.JCMU.AddonManager.Models;
+
+/// <summary>
+/// Represents the identity, versioning, and core metadata of a JCMU Addon.
+/// </summary>
+public record PluginManifest
+{
+    /// <summary>
+    /// A globally unique identifier for this addon (e.g., "JCMU.GitUtils"). 
+    /// Used for folder naming and preventing installation collisions.
+    /// </summary>
+    public required string AddonId { get; init; }
+
+    /// <summary>
+    /// The user-friendly name of the addon displayed in CLI logs and tools.
+    /// </summary>
+    public required string DisplayName { get; init; }
+
+    /// <summary>
+    /// The semantic version of the addon (e.g., "1.0.4").
+    /// </summary>
+    public required string Version { get; init; }
+
+    /// <summary>
+    /// The author or organization that created the addon.
+    /// </summary>
+    public required string Author { get; init; }
+
+    /// <summary>
+    /// A brief explanation of what the addon does.
+    /// </summary>
+    public string? Description { get; init; }
+
+    /// <summary>
+    /// The minimum version of the JCMU Core engine required to run this addon.
+    /// </summary>
+    public string? MinCoreVersion { get; init; }
+
+    /// <summary>
+    /// The URL to the plugin's github.  This is double checked by the framework.
+    /// </summary>
+    public string? RepositoryUrl { get; init; }
+
+    /// <summary>
+    /// Require the MenuDefinition so the core doesn't have to do reflection.
+    /// </summary>
+    public required MenuDefinition Menu { get; init; }
+
+    /// <summary>
+    /// Validates the manifest data, returning a successful Maybe if valid, 
+    /// or a failed Maybe containing the specific missing property message.
+    /// </summary>
+    /// <returns>A parameterless monad representing the validation result.</returns>
+    public Maybe Validate()
+    {
+        if (string.IsNullOrWhiteSpace(AddonId))
+            return Maybe.Fail("AddonId cannot be null or whitespace.");
+
+        if (!Regex.IsMatch(AddonId, @"^[a-zA-Z0-9\.\-_]+$"))
+            return Maybe.Fail("AddonId can only contain letters, numbers, periods, hyphens, and underscores. No spaces.");
+
+        if (string.IsNullOrWhiteSpace(Author))
+            return Maybe.Fail("Author cannot be null or whitespace.");
+
+        if (!Regex.IsMatch(Author, @"^[a-zA-Z0-9\-_]+$"))
+            return Maybe.Fail("Author can only contain letters, numbers, hyphens, and underscores. No spaces or special characters.");
+
+        if (string.IsNullOrWhiteSpace(DisplayName))
+            return Maybe.Fail("DisplayName cannot be null or whitespace.");
+
+        if (string.IsNullOrWhiteSpace(Version))
+            return Maybe.Fail("Version cannot be null or whitespace.");
+
+        if (Menu == null)
+            return Maybe.Fail("Manifest is missing the 'Menu' definition.");
+
+        return Maybe.SUCCESS;
+    }
+}
+
+
+ *****************
+JCMU.AddonManager/Security/ITrustManager.cs
+ *****************
+
+
+using JinnDev.Utilities.Monad;
+
+namespace JinnDev.JCMU.AddonManager.Security;
+
+public interface ITrustManager
+{
+    bool IsTrusted(string? author);
+    Maybe Trust(string author);
+    Maybe Untrust(string author);
+}
+
+
+ *****************
+JCMU.AddonManager/Security/TrustManager.cs
+ *****************
+
+
+using JinnDev.Utilities.Monad;
+using System.Text.Json;
+
+namespace JinnDev.JCMU.AddonManager.Security;
+
+public class TrustManager : ITrustManager
+{
+    private readonly string _trustFilePath;
+
+    public TrustManager()
+    {
+        var baseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "JCMU");
+        _trustFilePath = Path.Combine(baseDir, "trust.json");
+
+        EnsureInitialized();
+    }
+
+    public bool IsTrusted(string? author)
+    {
+        if (string.IsNullOrWhiteSpace(author)) return false;
+        var trustedList = LoadTrustList();
+        return trustedList.Contains(author, StringComparer.OrdinalIgnoreCase);
+    }
+
+    public Maybe Trust(string author)
+    {
+        return Maybe.Try(() =>
+        {
+            if (string.IsNullOrWhiteSpace(author)) throw new ArgumentException("Author cannot be empty.");
+
+            var list = LoadTrustList();
+            if (!list.Contains(author, StringComparer.OrdinalIgnoreCase))
+            {
+                list.Add(author);
+                SaveTrustList(list);
+            }
+        });
+    }
+
+    public Maybe Untrust(string author)
+    {
+        return Maybe.Try(() =>
+        {
+            if (string.IsNullOrWhiteSpace(author)) throw new ArgumentException("Author cannot be empty.");
+
+            var list = LoadTrustList();
+            // RemoveAll ensures case-insensitive matching if configured
+            list.RemoveAll(a => a.Equals(author, StringComparison.OrdinalIgnoreCase));
+            SaveTrustList(list);
+        });
+    }
+
+    private void EnsureInitialized()
+    {
+        if (!File.Exists(_trustFilePath))
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(_trustFilePath)!);
+            SaveTrustList(new List<string> { "JinnFletch" }); // Default trusted publisher
+        }
+    }
+
+    private List<string> LoadTrustList()
+    {
+        if (!File.Exists(_trustFilePath)) return new List<string>();
+        var json = File.ReadAllText(_trustFilePath);
+        return JsonSerializer.Deserialize<List<string>>(json) ?? new List<string>();
+    }
+
+    private void SaveTrustList(List<string> list)
+    {
+        var json = JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(_trustFilePath, json);
+    }
+}
+
+ *****************
+JCMU.AddonManager/Sources/GitHubAddonSource.cs
+ *****************
+
+
+using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using JinnDev.JCMU.AddonManager.Interfaces;
+using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.JCMU.AddonManager.Utilities;
+using JinnDev.Utilities.Monad;
+
+namespace JinnDev.JCMU.AddonManager.Sources;
+
+/// <summary>
+/// Implements the Addon Source by querying the public GitHub REST API.
+/// </summary>
+public class GitHubAddonSource : IAddonSource
+{
+    private readonly HttpClient _httpClient;
+    private const string GitHubApiBase = "https://api.github.com";
+
+    public GitHubAddonSource()
+    {
+        _httpClient = new HttpClient();
+        // GitHub API requires a User-Agent header.
+        _httpClient.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("JCMU.AddonManager", "1.0"));
+        _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
+    }
+
+    public async Task<Maybe<AddonPagedResult>> SearchAsync(string? query, int page = 1)
+    {
+        return await Maybe.TryAsync<AddonPagedResult>(async () =>
+        {
+            // If query is null/empty, we just search the topic globally
+            // Enforce searching only for repos tagged with our specific ecosystem topic
+            var searchTerm = string.IsNullOrWhiteSpace(query) ? "topic:jcmu-addon" : $"{query} topic:jcmu-addon";
+            var encodedQuery = Uri.EscapeDataString(searchTerm);
+
+            var requestUrl = $"{GitHubApiBase}/search/repositories?q={encodedQuery}&sort=stars&order=desc&per_page=10&page={page}";
+
+            using var response = await _httpClient.GetAsync(requestUrl).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+
+            var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var result = JsonSerializer.Deserialize<GitHubSearchResponse>(json)
+                         ?? throw new Exception("Failed to deserialize GitHub search response.");
+
+            var mappedResults = result.Items.Select(repo => new AddonSearchResult
+            {
+                AddonId = repo.FullName,
+                RepositoryUrl = repo.HtmlUrl,
+                Description = repo.Description,
+                Author = repo.Owner?.Login,
+                Tags = repo.Topics ?? []
+            }).ToList();
+
+            return new AddonPagedResult(mappedResults, result.TotalCount);
+        }).ConfigureAwait(false);
+    }
+
+    public async Task<Maybe<IReadOnlyList<AddonVersionInfo>>> GetVersionsAsync(string repositoryUrl)
+    {
+        return await Maybe.TryAsync<IReadOnlyList<AddonVersionInfo>>(async () =>
+        {
+            // Convert 'https://github.com/author/repo' to 'author/repo'
+            if (!Uri.TryCreate(repositoryUrl, UriKind.Absolute, out var uri) || uri.Segments.Length < 3)
+                throw new ArgumentException($"Invalid GitHub repository URL: {repositoryUrl}");
+
+            var owner = uri.Segments[1].Trim('/');
+            var repo = uri.Segments[2].Trim('/');
+            var requestUrl = $"{GitHubApiBase}/repos/{owner}/{repo}/tags";
+
+            using var response = await _httpClient.GetAsync(requestUrl).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+
+            var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var tags = JsonSerializer.Deserialize<List<GitHubTagResponse>>(json)
+                       ?? throw new Exception("Failed to deserialize GitHub tags response.");
+
+            var mappedVersions = tags.Select(tag => new AddonVersionInfo
+            {
+                VersionName = tag.Name,
+                CommitHash = tag.Commit?.Sha ?? string.Empty,
+                IsPreRelease = tag.Name.Contains("-alpha", StringComparison.OrdinalIgnoreCase) ||
+                               tag.Name.Contains("-beta", StringComparison.OrdinalIgnoreCase)
+            }).ToList();
+
+            return mappedVersions;
+        }).ConfigureAwait(false);
+    }
+
+    public async Task<Maybe> DownloadSourceAsync(string repositoryUrl, string version, string targetTempPath)
+    {
+        return await Maybe.TryAsync(async () =>
+        {
+            if (string.IsNullOrWhiteSpace(repositoryUrl))
+                throw new ArgumentException("Repository URL cannot be empty.");
+
+            if (string.IsNullOrWhiteSpace(version))
+                throw new ArgumentException("Version cannot be empty.");
+
+            if (string.IsNullOrWhiteSpace(targetTempPath))
+                throw new ArgumentException("Target temp path cannot be empty.");
+
+            // Use shallow clone (--depth 1) to grab only the specific tag/branch without full commit history
+            var arguments = new[] { "clone", "--branch", version, "--depth", "1", repositoryUrl, targetTempPath };
+            var cloneResult = await CliRunner.RunAsync("git", arguments).ConfigureAwait(false);
+
+            // If the CliRunner monad failed, we throw to let the outer TryAsync catch and propagate it
+            if (!cloneResult.HasValue)
+            {
+                throw new Exception($"Failed to clone repository: {cloneResult.Message}", cloneResult.Exception);
+            }
+        }).ConfigureAwait(false);
+    }
+
+    #region Private DTOs for GitHub JSON Mapping
+
+    private record GitHubSearchResponse(
+        [property: JsonPropertyName("total_count")] int TotalCount,
+        [property: JsonPropertyName("items")] List<GitHubRepoDto> Items);
+
+    private record GitHubRepoDto(
+        [property: JsonPropertyName("full_name")] string FullName,
+        [property: JsonPropertyName("html_url")] string HtmlUrl,
+        [property: JsonPropertyName("description")] string? Description,
+        [property: JsonPropertyName("owner")] GitHubOwnerDto? Owner,
+        [property: JsonPropertyName("topics")] List<string>? Topics);
+
+    private record GitHubOwnerDto([property: JsonPropertyName("login")] string Login);
+
+    private record GitHubTagResponse(
+        [property: JsonPropertyName("name")] string Name,
+        [property: JsonPropertyName("commit")] GitHubCommitDto? Commit);
+
+    private record GitHubCommitDto([property: JsonPropertyName("sha")] string Sha);
+
+    #endregion
+}
+
+ *****************
+JCMU.AddonManager/Utilities/CliRunner.cs
+ *****************
+
+
+using System.Diagnostics;
+using System.Text;
+using JinnDev.Utilities.Monad;
+
+namespace JinnDev.JCMU.AddonManager.Utilities;
+
+/// <summary>
+/// A monadic utility for securely executing command-line processes (like git.exe or dotnet.exe),
+/// capturing standard output and standard error without throwing exceptions.
+/// </summary>
+internal static class CliRunner
+{
+    /// <summary>
+    /// Executes a command-line process asynchronously.
+    /// </summary>
+    /// <param name="fileName">The executable to run (e.g., "git" or "dotnet").</param>
+    /// <param name="arguments">The arguments to pass to the executable.</param>
+    /// <param name="workingDirectory">The directory to execute the command in.</param>
+    /// <returns>A monad containing the standard output on success, or the error output on failure.</returns>
+    public static async Task<Maybe<string>> RunAsync(string fileName, IEnumerable<string> arguments, string workingDirectory = "")
+    {
+        return await Maybe.TryAsync<string>(async () =>
+        {
+            var processInfo = new ProcessStartInfo
+            {
+                FileName = fileName,
+                WorkingDirectory = workingDirectory,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            foreach (var arg in arguments)
+            {
+                processInfo.ArgumentList.Add(arg);
+            }
+
+            using var process = new Process();
+            process.StartInfo = processInfo;
+
+            var outputBuilder = new StringBuilder();
+            var errorBuilder = new StringBuilder();
+
+            process.OutputDataReceived += (_, e) =>
+            {
+                if (!string.IsNullOrWhiteSpace(e.Data))
+                {
+                    outputBuilder.AppendLine(e.Data);
+                }
+            };
+
+            process.ErrorDataReceived += (_, e) =>
+            {
+                if (!string.IsNullOrWhiteSpace(e.Data))
+                {
+                    errorBuilder.AppendLine(e.Data);
+                }
+            };
+
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+
+            // Wait for the process to complete gracefully
+            await process.WaitForExitAsync().ConfigureAwait(false);
+
+            var output = outputBuilder.ToString().Trim();
+            var error = errorBuilder.ToString().Trim();
+
+            if (process.ExitCode == 0)
+            {
+                return output;
+            }
+
+            // If it failed, prefer the error stream, but fallback to output stream if error is empty
+            var failureMessage = !string.IsNullOrWhiteSpace(error) ? error : output;
+            if (string.IsNullOrWhiteSpace(failureMessage))
+            {
+                failureMessage = $"Process '{fileName}' exited with code {process.ExitCode} but provided no error output.";
+            }
+
+            throw new Exception(failureMessage);
+        }).ConfigureAwait(false);
+    }
+}
+
+ *****************
+JCMU.AddonManager/Utilities/FileSystemManager.cs
+ *****************
+
+
+using System.Text.Json;
+using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.JCMU.SDK.Models;
+using JinnDev.Utilities.Monad;
+
+namespace JinnDev.JCMU.AddonManager.Utilities;
+
+/// <summary>
+/// A monadic utility for handling secure I/O operations, directory state management, 
+/// and context generation for the JCMU Addon Manager.
+/// </summary>
+internal static class FileSystemManager
+{
+    private static readonly string BaseDirectory = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "JCMU");
+
+    /// <summary>
+    /// Generates the immutable installation context containing all required absolute paths.
+    /// </summary>
+    public static InstallContext CreateInstallContext(string addonId, string version, string repositoryUrl)
+    {
+        var tempBase = Path.Combine(BaseDirectory, "Temp", $"{addonId}_{Guid.NewGuid().ToString()[..8]}");
+
+        return new InstallContext
+        {
+            TargetAddonId = addonId,
+            SelectedVersion = version,
+            RepositoryUrl = repositoryUrl,
+            TempCloneDirectory = Path.Combine(tempBase, "Source"),
+            TempPublishDirectory = Path.Combine(tempBase, "Publish"),
+            FinalPluginDirectory = Path.Combine(BaseDirectory, "Plugins", addonId)
+        };
+    }
+
+    /// <summary>
+    /// Safely creates the necessary temporary directories, wiping them first if they somehow exist.
+    /// </summary>
+    public static async Task<Maybe<InstallContext>> PrepareTempDirectoriesAsync(InstallContext context)
+    {
+        return Maybe.Try<InstallContext>(() =>
+        {
+            if (Directory.Exists(context.TempCloneDirectory))
+                Directory.Delete(context.TempCloneDirectory, true);
+
+            if (Directory.Exists(context.TempPublishDirectory))
+                Directory.Delete(context.TempPublishDirectory, true);
+
+            Directory.CreateDirectory(context.TempCloneDirectory);
+            Directory.CreateDirectory(context.TempPublishDirectory);
+
+            return context;
+        });
+    }
+
+    /// <summary>
+    /// Verifies that the compiled output contains a valid manifest.json.
+    /// </summary>
+    public static async Task<Maybe<InstallContext>> ValidateCompiledManifestAsync(InstallContext ctx)
+    {
+        return await Maybe.TryAsync<InstallContext>(async () =>
+        {
+            var manifestPath = Path.Combine(ctx.TempPublishDirectory, "manifest.json");
+            if (!File.Exists(manifestPath))
+                throw new FileNotFoundException("The compiled output is missing a 'manifest.json' file. This is not a valid JCMU Addon.");
+
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+
+            var json = await File.ReadAllTextAsync(manifestPath).ConfigureAwait(false);
+            var manifest = JsonSerializer.Deserialize<PluginManifest>(json, options)
+                           ?? throw new Exception("Failed to deserialize manifest.json.");
+
+            var validation = manifest.Validate();
+            if (!validation.HasValue)
+                throw new Exception($"Manifest validation failed: {validation.Message}");
+
+            var currentCoreVersion = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version
+                         ?? typeof(FileSystemManager).Assembly.GetName().Version;
+
+            if (Version.TryParse(manifest.MinCoreVersion, out var minVersion))
+            {
+                if (currentCoreVersion < minVersion)
+                    throw new Exception($"This addon requires JCMU Core v{minVersion} or higher. Please update JCMU.");
+            }
+
+            // --- ANTI-SPOOFING STAMP ---
+            // Authoritative URL we got from the GitHub API in Phase 1.
+            var stampedManifest = manifest with { RepositoryUrl = ctx.RepositoryUrl };
+
+            var newJson = JsonSerializer.Serialize(stampedManifest, new JsonSerializerOptions { WriteIndented = true });
+            await File.WriteAllTextAsync(manifestPath, newJson).ConfigureAwait(false);
+            // ---------------------------
+
+            return ctx;
+        }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Safely moves the compiled DLLs from the temp directory to the final ProgramData plugin directory.
+    /// </summary>
+    public static async Task<Maybe<InstallContext>> MoveToFinalDestinationAsync(InstallContext context)
+    {
+        return Maybe.Try<InstallContext>(() =>
+        {
+            if (Directory.Exists(context.FinalPluginDirectory))
+                Directory.Delete(context.FinalPluginDirectory, true);
+
+            Directory.CreateDirectory(Path.GetDirectoryName(context.FinalPluginDirectory)!);
+            Directory.Move(context.TempPublishDirectory, context.FinalPluginDirectory);
+
+            return context;
+        });
+    }
+
+    /// <summary>
+    /// Best-effort cleanup of temporary directories. Does not fail the pipeline if a file is locked.
+    /// </summary>
+    public static async Task<Maybe> CleanupTempDirectoriesAsync(InstallContext context)
+    {
+        return Maybe.Try(() =>
+        {
+            var tempBase = Path.GetDirectoryName(context.TempCloneDirectory);
+            if (tempBase != null && Directory.Exists(tempBase))
+            {
+                ForceDeleteDirectory(tempBase);
+            }
+        });
+    }
+
+    // Strips read-only attributes before deleting
+    private static void ForceDeleteDirectory(string targetDir)
+    {
+        var directory = new DirectoryInfo(targetDir);
+
+        // Remove ReadOnly attributes from all files and subdirectories
+        foreach (var info in directory.GetFileSystemInfos("*", SearchOption.AllDirectories))
+        {
+            info.Attributes &= ~FileAttributes.ReadOnly;
+        }
+
+        directory.Delete(true);
+    }
+}
+
+ *****************
+JCMU.ConsoleBed/JCMU.ConsoleBed.csproj
+ *****************
+
+
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<AssemblyName>jcmu</AssemblyName>
+		<Version>1.3.3</Version>
+		<AssemblyVersion>1.3.3</AssemblyVersion>
+		<FileVersion>1.3.3</FileVersion>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net8.0</TargetFramework>
+		<LangVersion>12</LangVersion>
+		<RootNamespace>JinnDev.$(MSBuildProjectName.Replace(" ", "_"))</RootNamespace>
+		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Authors>JinnDev</Authors>
+		<Company>Jinn Studios</Company>
+		<Product>Jinn Context Menu Utility Addon Manager</Product>
+		<Nullable>enable</Nullable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\JCMU.CoreTools\JCMU.CoreTools.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
+		<PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.1" />
+		<PackageReference Include="Serilog" Version="4.0.0" />
+		<PackageReference Include="Serilog.Extensions.Logging" Version="8.0.0" />
+		<PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
+		<PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
+		<PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Content Update="Icons\abort.ico">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</Content>
+		<Content Update="Icons\backup.ico">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</Content>
+		<Content Update="Icons\jinn.ico">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</Content>
+	</ItemGroup>
+
+</Project>
+
+
+ *****************
+JCMU.ConsoleBed/Program.cs
+ *****************
+
+
+using JinnDev.JCMU.AddonManager.Builders;
+using JinnDev.JCMU.AddonManager.Installers;
+using JinnDev.JCMU.AddonManager.Interfaces;
+using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.JCMU.AddonManager.Security;
+using JinnDev.JCMU.AddonManager.Sources;
+using JinnDev.JCMU.ConsoleBed.Cli;
+using JinnDev.JCMU.ConsoleBed.Execution;
+using JinnDev.JCMU.ConsoleBed.Registry;
+using JinnDev.JCMU.ConsoleBed.Runtime;
+using JinnDev.JCMU.CoreTools;
+using JinnDev.Utilities.CommandLine;
+using JinnDev.Utilities.Monad;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Serilog;
+using Serilog.Events;
+using System.Runtime.Versioning;
+
+namespace JinnDev.JCMU.ConsoleBed;
+
+[SupportedOSPlatform("windows")]
+public class Program
+{
+    // Caches to hold numbered list outputs
+    private static Dictionary<int, AddonSearchResult>? _lastSearchResults;
+    private static IReadOnlyList<string>? _lastListResults;
+    private static ServiceProvider _serviceProvider = null!;
+
+    public static async Task<int> Main(string[] args)
+    {
+        var logPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "JCMU", "Logs", "jcmu-core-.txt");
+
+        Log.Logger = new LoggerConfiguration()
+                    .MinimumLevel.Information()
+                    .MinimumLevel.Override("Microsoft", LogEventLevel.Warning) // Keep MS noise out of logs
+                    .WriteTo.Console(
+                        // {Message:lj} prints the exact string with no quotes. No timestamps or [INF] tags!
+                        outputTemplate: "{Message:lj}{NewLine}{Exception}")
+                    .WriteTo.File(logPath,
+                        // Keep the file logs highly detailed for troubleshooting
+                        outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}",
+                        rollingInterval: RollingInterval.Day,
+                        retainedFileCountLimit: 7)
+                    .CreateLogger();
+
+        try
+        {
+            var services = new ServiceCollection();
+            ConfigureServices(services);
+            _serviceProvider = services.BuildServiceProvider();
+            await using var _ = _serviceProvider.ConfigureAwait(false);
+
+            var storeDispatcher = _serviceProvider.GetRequiredService<StoreCliDispatcher>();
+            var executionDispatcher = _serviceProvider.GetRequiredService<ExecutionCliDispatcher>();
+            var coreRegistrar = _serviceProvider.GetRequiredService<CoreRegistrar>();
+
+            // 1. Detect if we are entering the UI/Interactive mode
+            bool interactiveMode = args.Length > 0 && args[0].Equals("-i", StringComparison.OrdinalIgnoreCase);
+            bool isManualLaunch = args.Length == 0;
+
+            // 2. Always print help at the very top if a UI is being shown
+            if (interactiveMode || isManualLaunch)
+            {
+                PrintHelp();
+            }
+
+            string[] commandArgs = args;
+            if (interactiveMode)
+            {
+                commandArgs = args.Skip(1).ToArray(); // Strip -i for the router
+            }
+
+            // 3. Execute initial command if provided
+            if (commandArgs.Length > 0)
+            {
+                var result = await RouteCommandAsync(commandArgs, storeDispatcher, executionDispatcher, coreRegistrar).ConfigureAwait(false);
+
+                // Exit immediately if this wasn't an interactive session (e.g. Shell Execute)
+                if (!interactiveMode)
+                {
+                    return result.HasValue ? 0 : 1;
+                }
+            }
+
+            // 4. REPL Loop
+            while (true)
+            {
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.Write("JCMU> ");
+                Console.ResetColor();
+
+                var input = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(input)) continue;
+
+                if (input.Equals("exit", StringComparison.OrdinalIgnoreCase) ||
+                    input.Equals("quit", StringComparison.OrdinalIgnoreCase))
+                {
+                    break;
+                }
+
+                var inputArgs = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                await RouteCommandAsync(inputArgs, storeDispatcher, executionDispatcher, coreRegistrar).ConfigureAwait(false);
+            }
+
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Log.Fatal(ex, "JCMU Core terminated unexpectedly");
+            return 1;
+        }
+        finally
+        {
+            await Log.CloseAndFlushAsync().ConfigureAwait(false);
+        }
+    }
+
+    private static async Task<Maybe> RouteCommandAsync(
+        string[] args,
+        StoreCliDispatcher storeDispatcher,
+        ExecutionCliDispatcher executionDispatcher,
+        CoreRegistrar coreRegistrar)
+    {
+        var verb = args[0].ToLowerInvariant();
+
+        // 1. Capture the memory state for this specific execution turn
+        var searchCache = _lastSearchResults;
+        var listCache = _lastListResults;
+
+        // 2. Immediately clear the global state. 
+        // Only `search` or `list` will refill these for the NEXT turn.
+        _lastSearchResults = null;
+        _lastListResults = null;
+
+        var toolDispatcher = _serviceProvider.GetRequiredService<ToolCliDispatcher>();
+
+        var executionTask = verb switch
+        {
+            "search" => storeDispatcher.HandleSearchAsync(args, results => _lastSearchResults = results),
+            "install" => storeDispatcher.HandleInstallAsync(args, searchCache),
+            "list" => StoreCliDispatcher.HandleListAsync(results => _lastListResults = results),
+            "update" => storeDispatcher.HandleUpdateAsync(args, listCache),
+            "uninstall" => storeDispatcher.HandleUninstallAsync(args, listCache),
+            "execute" => executionDispatcher.HandleExecuteAsync(args),
+            "init" => Task.FromResult(InitializePlatform(coreRegistrar)),
+            "teardown" => Task.FromResult(TeardownPlatform(coreRegistrar)),
+            "trust" => storeDispatcher.HandleTrustAsync(args),
+            "untrust" => storeDispatcher.HandleUntrustAsync(args),
+            "tool" => args.Length > 2
+                      ? toolDispatcher.HandleToolAsync(args[1], args[2].Trim('"'))
+                      : Task.FromResult(Maybe.Fail("Usage: jcmu tool <ToolId> <TargetDirectory>")),
+            "dev" => RouteDevCommandAsync(args, toolDispatcher),
+            _ => Task.FromResult(Maybe.Fail($"Unknown command: {verb}"))
+        };
+
+        var result = await executionTask.ConfigureAwait(false);
+
+        if (!result.HasValue && verb != "execute")
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"[ERROR] {result.Message}");
+            Console.ResetColor();
+        }
+
+        return result;
+    }
+
+    private static Task<Maybe> RouteDevCommandAsync(string[] args, ToolCliDispatcher toolDispatcher)
+    {
+        if (args.Length < 2)
+            return Task.FromResult(Maybe.Fail("Usage: jcmu dev link [path] OR jcmu dev unlink <AddonId>"));
+
+        return args[1].ToLowerInvariant() switch
+        {
+            "link" => toolDispatcher.HandleToolAsync("Core.DevLink", args.Length > 2 ? string.Join(" ", args.Skip(2)) : Environment.CurrentDirectory),
+
+            "unlink" => args.Length > 2
+                        ? toolDispatcher.HandleToolAsync("Core.DevUnlink", args[2])
+                        : Task.FromResult(Maybe.Fail("Usage: jcmu dev unlink <AddonId>")),
+
+            _ => Task.FromResult(Maybe.Fail($"Unknown dev command: {args[1]}"))
+        };
+    }
+
+    private static Maybe InitializePlatform(CoreRegistrar registrar)
+    {
+        var result = registrar.InitializeCore();
+        if (result.HasValue)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("\n[SUCCESS] JCMU Core Registry Anchors initialized.");
+            Console.WriteLine("You can now install addons, and they will appear in your right-click menu.");
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"\n[FAILED] Initialization failed: {result.Message}");
+        }
+        Console.ResetColor();
+        return result;
+    }
+
+    private static Maybe TeardownPlatform(CoreRegistrar registrar)
+    {
+        var result = registrar.TeardownCore();
+        if (result.HasValue)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("\n[SUCCESS] JCMU Core Registry Anchors removed.");
+            Console.WriteLine("The JCMU menu will no longer appear when you right-click.");
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"\n[FAILED] Teardown failed: {result.Message}");
+        }
+        Console.ResetColor();
+        return result;
+    }
+
+    private static void ConfigureServices(IServiceCollection services)
+    {
+        services.AddLogging(builder =>
+        {
+            builder.AddSerilog(dispose: true);
+        });
+
+        services.AddSingleton<ITrustManager>(x => new TrustManager());
+        services.AddTransient<IAddonSource>(x => new GitHubAddonSource());
+        services.AddTransient<IAddonBuilder>(x => new DotNetAddonBuilder());
+        services.AddTransient<IAddonInstaller>(x => new AddonInstaller(x.GetRequiredService<IAddonBuilder>(), x.GetRequiredService<ITrustManager>(), x.GetRequiredService<ILogger<AddonInstaller>>()));
+        services.AddTransient<IRegistryManager>(x => new RegistryManager(x.GetRequiredService<ILogger<RegistryManager>>()));
+        services.AddTransient<CoreRegistrar>(x => new CoreRegistrar(x.GetRequiredService<IRegistryManager>(), x.GetRequiredService<IEnumerable<ICoreTool>>(), x.GetRequiredService<ILogger<CoreRegistrar>>()));
+        services.AddSingleton<IPluginLoader>(x => new PluginLoader(x.GetRequiredService<ILogger<PluginLoader>>()));
+        services.AddSingleton<IPluginInvoker>(x => new PluginInvoker(x.GetRequiredService<IPluginLoader>(), x.GetRequiredService<ILoggerFactory>()));
+        services.AddTransient<StoreCliDispatcher>(x => new StoreCliDispatcher(x.GetRequiredService<IAddonInstaller>(), x.GetRequiredService<IAddonSource>(), x.GetRequiredService<IRegistryManager>(), x.GetRequiredService<ITrustManager>(), x.GetRequiredService<ILogger<StoreCliDispatcher>>()));
+        services.AddTransient<ExecutionCliDispatcher>(x => new ExecutionCliDispatcher(x.GetRequiredService<IPluginInvoker>(), x.GetRequiredService<ILogger<ExecutionCliDispatcher>>()));
+        
+        services.AddStatelessCommandLineRunner();
+
+        // --- AUTO-REGISTER ALL CORE TOOLS ---
+        var coreToolType = typeof(ICoreTool);
+        var toolTypes = typeof(ICoreTool).Assembly.GetTypes()
+            .Where(t => coreToolType.IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract);
+
+        foreach (var type in toolTypes)
+        {
+            // Multiple registrations of `ICoreTool` creates `IEnumerable<ICoreTool>` for dependency injection
+            // Transient means a fresh instance is created every time the tool is invoked
+            services.AddTransient(coreToolType, type);
+        }
+
+        services.AddTransient<ToolCliDispatcher>(x => new ToolCliDispatcher(x.GetRequiredService<IEnumerable<ICoreTool>>(), x.GetRequiredService<ILogger<ToolCliDispatcher>>()));
+    }
+
+    private static void PrintHelp()
+    {
+        Console.WriteLine("\n==================================================");
+        Console.WriteLine("    Jinn Context Menu Utility (JCMU) Core CLI     ");
+        Console.WriteLine("==================================================\n");
+
+        Console.WriteLine("Package Management:");
+        Console.WriteLine("  search <keyword>              Find new addons on GitHub.");
+        Console.WriteLine("  list                          Show all currently installed addons.");
+        Console.WriteLine("  install <Id | Number>         Install an addon (e.g., 'install 1' after search).");
+        Console.WriteLine("  update <Id | Number>          Update an installed addon to the latest version.");
+        Console.WriteLine("  uninstall <Id | Number>       Remove an addon (e.g., 'uninstall 1' after list).");
+        Console.WriteLine("  trust <Author>                Allow installation of an author's addons.");
+        Console.WriteLine("  untrust <Author>              Revoke installation trust for an author.");
+        Console.WriteLine("  dev link [path]               Path to a local csproj to test addon development.");
+        Console.WriteLine("  dev unlink <AddonId>          The AddonId to unlink once development is over.");
+
+        Console.WriteLine("\nSystem Configuration:");
+        Console.WriteLine("  init                          Registers the 'JinnCM' root menu in Windows.");
+        Console.WriteLine("  teardown                      Removes all JCMU hooks from the Windows Shell.");
+        Console.WriteLine("  exit | quit                   Close the JCMU console.");
+
+        Console.WriteLine("\nAdvanced / Shell Internal:");
+        Console.WriteLine("  execute <Id> <Path>           Triggers addon logic (called by Windows Explorer).");
+
+        Console.WriteLine("\n--------------------------------------------------");
+        Console.WriteLine("Tip: Use 'search' or 'list' first, then you can use the index number!");
+        Console.WriteLine("--------------------------------------------------\n");
+    }
+}
+
+ *****************
+JCMU.ConsoleBed/Cli/ExecutionCliDispatcher.cs
+ *****************
+
+
+using JinnDev.JCMU.ConsoleBed.Execution;
+using JinnDev.Utilities.Monad;
+using Microsoft.Extensions.Logging;
+
+namespace JinnDev.JCMU.ConsoleBed.Cli;
+
+/// <summary>
+/// Instantiates and executes a specific addon against a target directory.
+/// Expected format: `jcmu execute <AddonId> [-b] "<TargetDirectory>"`
+/// </summary>
+public class ExecutionCliDispatcher
+{
+    private readonly IPluginInvoker _invoker;
+    private readonly ILogger<ExecutionCliDispatcher> _logger;
+
+    public ExecutionCliDispatcher(IPluginInvoker invoker, ILogger<ExecutionCliDispatcher> logger)
+    {
+        _invoker = invoker;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Instantiates and executes a specific addon against a target directory.
+    /// Expected format: `jcmu execute <AddonId> [-b] "<TargetDirectory>"`
+    /// </summary>
+    public async Task<Maybe> HandleExecuteAsync(string[] args)
+    {
+        if (args.Length < 3)
+        {
+            var msg = "Usage: jcmu execute <AddonId> \"<TargetDirectory>\"";
+            _logger.LogError(msg);
+            return Maybe.Fail(msg);
+        }
+
+        var addonId = args[1];
+        var targetDirectory = args[2].Trim('"');
+
+        _logger.LogInformation("--- Execution Triggered via Shell ---");
+
+        // The Invoker now returns Maybe<int>
+        var result = await _invoker.ExecuteAsync(addonId, targetDirectory).ConfigureAwait(false);
+
+        // Only perform interactive UI pauses if we are actually in a visible console
+        if (!Console.IsOutputRedirected && Console.WindowHeight > 0)
+        {
+            await result.MatchAsync(
+                someAsync: async seconds =>
+                {
+                    if (seconds < 0)
+                    {
+                        Console.WriteLine("\n[Execution Complete] Press any key to exit...");
+                        Console.ReadKey(true);
+                    }
+                    else if (seconds > 0)
+                    {
+                        Console.WriteLine();
+                        await RunCountdownAsync(seconds, "Closing in {0} seconds...").ConfigureAwait(false);
+                    }
+                },
+                noneAsync: async err =>
+                {
+                    Console.WriteLine();
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[EXECUTION FAILED]: {addonId}");
+
+                    Console.WriteLine(err.Message);
+
+                    Console.ResetColor();
+                    Console.WriteLine();
+
+                    await RunCountdownAsync(10, "Closing due to failure in {0} seconds...").ConfigureAwait(false);
+                }
+            ).ConfigureAwait(false);
+        }
+
+        // Downgrade the result to a parameterless Maybe to satisfy the CLI router
+        return result.HasValue ? Maybe.SUCCESS : Maybe.PropagateFailure(result);
+    }
+
+    private static async Task RunCountdownAsync(int seconds, string messageTemplate)
+    {
+        for (int i = seconds; i > 0; i--)
+        {
+            // \r returns the cursor to the start of the line for a clean overwriting effect
+            Console.Write($"\r{string.Format(messageTemplate, i)}   ");
+            await Task.Delay(1000).ConfigureAwait(false);
+        }
+        Console.WriteLine();
+    }
+}
+
+ *****************
+JCMU.ConsoleBed/Cli/StoreCliDispatcher.cs
+ *****************
+
+
+using JinnDev.JCMU.AddonManager.Interfaces;
+using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.JCMU.AddonManager.Security;
+using JinnDev.Utilities.Monad;
+using Microsoft.Extensions.Logging;
+using System.Diagnostics;
+
+namespace JinnDev.JCMU.ConsoleBed.Cli;
+
+public class StoreCliDispatcher
+{
+    private readonly IAddonInstaller _installer;
+    private readonly IAddonSource _source;
+    private readonly IRegistryManager _registryManager;
+    private readonly ITrustManager _trustManager;
+    private readonly ILogger<StoreCliDispatcher> _logger;
+
+    public StoreCliDispatcher(
+        IAddonInstaller installer,
+        IAddonSource source,
+        IRegistryManager registryManager,
+        ITrustManager trustManager,
+        ILogger<StoreCliDispatcher> logger)
+    {
+        _installer = installer;
+        _source = source;
+        _registryManager = registryManager;
+        _trustManager = trustManager;
+        _logger = logger;
+    }
+
+    public Task<Maybe> HandleTrustAsync(string[] args)
+    {
+        if (args.Length < 2) return Task.FromResult(Maybe.Fail("Usage: jcmu trust <Author>"));
+        var result = _trustManager.Trust(args[1]);
+        if (result.HasValue) Console.WriteLine($"\n[SUCCESS] '{args[1]}' has been added to trusted publishers.");
+        return Task.FromResult(result);
+    }
+
+    public Task<Maybe> HandleUntrustAsync(string[] args)
+    {
+        if (args.Length < 2) return Task.FromResult(Maybe.Fail("Usage: jcmu untrust <Author>"));
+        var result = _trustManager.Untrust(args[1]);
+        if (result.HasValue) Console.WriteLine($"\n[SUCCESS] '{args[1]}' has been removed from trusted publishers.");
+        return Task.FromResult(result);
+    }
+
+    public async Task<Maybe> HandleInstallAsync(string[] args, Dictionary<int, AddonSearchResult>? searchCache)
+    {
+        if (args.Length < 2) return Maybe.Fail("Usage: jcmu install <AddonId|Number>");
+
+        var input = args[1];
+        var addonId = input;
+
+        if (int.TryParse(input, out var index))
+        {
+            if (searchCache == null || searchCache.Count == 0)
+                return Maybe.Fail("Numeric installation only works immediately after running a 'search'.");
+            if (!searchCache.TryGetValue(index, out AddonSearchResult? value))
+                return Maybe.Fail($"Invalid index '{index}'. The last search did not display that number.");
+            addonId = value.AddonId;
+        }
+
+        var version = args.Length > 2 ? args[2] : null;
+
+        Console.WriteLine($"\n--- Installing Addon: {addonId} {(version != null ? $"[{version}]" : "[Latest]")} ---");
+
+        var result = await _installer.InstallAsync(_source, addonId, version)
+            .BindAsync(async finalDirectory =>
+            {
+                var coreExePath = Process.GetCurrentProcess().MainModule?.FileName
+                                  ?? throw new Exception("Could not determine the executing Core EXE path.");
+
+                // Read directly from manifest.json, completely bypassing DLL file locks
+                var manifestPath = Path.Combine(finalDirectory, "manifest.json");
+                var options = new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                var json = await File.ReadAllTextAsync(manifestPath).ConfigureAwait(false);
+                var manifest = System.Text.Json.JsonSerializer.Deserialize<PluginManifest>(json, options)
+                               ?? throw new Exception("Failed to parse manifest.json during registration.");
+
+                return _registryManager.RegisterAddon(addonId, manifest.Menu, coreExePath);
+            }).ConfigureAwait(false);
+
+        if (result.HasValue)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"\n[SUCCESS] '{addonId}' has been installed and its menus registered.");
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"\n[FAILED] '{addonId}' failed during installation or registration:");
+            Console.WriteLine($"-> {result.Message}");
+        }
+
+        Console.ResetColor();
+        return result;
+    }
+
+    public async Task<Maybe> HandleUpdateAsync(string[] args, IReadOnlyList<string>? listCache)
+    {
+        if (args.Length < 2) return Maybe.Fail("Usage: jcmu update <AddonId|Number>");
+
+        var input = args[1];
+        var addonId = input;
+
+        // Resolve number from the 'list' cache
+        if (int.TryParse(input, out var index))
+        {
+            if (listCache == null || listCache.Count == 0)
+                return Maybe.Fail("Numeric updating only works immediately after running a 'list'.");
+
+            if (index < 1 || index > listCache.Count)
+                return Maybe.Fail($"Invalid index '{index}'. The last list only had {listCache.Count} results.");
+
+            addonId = listCache[index - 1];
+        }
+
+        Console.WriteLine($"\n--- Updating Addon: {addonId} [Latest] ---");
+
+        // Passing null for version tells the installer to grab the newest tag
+        var result = await _installer.InstallAsync(_source, addonId, null)
+            .BindAsync(async finalDirectory =>
+            {
+                var coreExePath = Process.GetCurrentProcess().MainModule?.FileName
+                                  ?? throw new Exception("Could not determine the executing Core EXE path.");
+
+                var manifestPath = Path.Combine(finalDirectory, "manifest.json");
+                var json = await File.ReadAllTextAsync(manifestPath).ConfigureAwait(false);
+                var manifest = System.Text.Json.JsonSerializer.Deserialize<PluginManifest>(json,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                               ?? throw new Exception("Failed to parse manifest.json during update.");
+
+                // Overwrite the registry keys in case the developer changed the menu structure
+                return _registryManager.RegisterAddon(addonId, manifest.Menu, coreExePath);
+            }).ConfigureAwait(false);
+
+        if (result.HasValue)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"\n[SUCCESS] '{addonId}' has been successfully updated to the latest version.");
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"\n[FAILED] '{addonId}' failed to update:");
+            Console.WriteLine($"-> {result.Message}");
+        }
+
+        Console.ResetColor();
+        return result;
+    }
+
+    public async Task<Maybe> HandleUninstallAsync(string[] args, IReadOnlyList<string>? listCache)
+    {
+        if (args.Length < 2) return Maybe.Fail("Usage: jcmu uninstall <AddonId|Number>");
+
+        var input = args[1];
+        var addonId = input;
+
+        if (int.TryParse(input, out var index))
+        {
+            if (listCache == null || listCache.Count == 0)
+                return Maybe.Fail("Numeric uninstallation only works immediately after running a 'list'.");
+
+            if (index < 1 || index > listCache.Count)
+                return Maybe.Fail($"Invalid index '{index}'. The last list only had {listCache.Count} results.");
+
+            addonId = listCache[index - 1];
+        }
+
+        Console.WriteLine($"\n--- Uninstalling Addon: {addonId} ---");
+
+        var uninstallResult = await _installer.UninstallAsync(addonId).ConfigureAwait(false);
+        var registryResult = _registryManager.UnregisterAddon(addonId);
+
+        var finalResult = uninstallResult.HasValue && registryResult.HasValue
+            ? Maybe.SUCCESS
+            : Maybe.Fail($"Uninstall: {uninstallResult.Message} | Registry: {registryResult.Message}");
+
+        if (finalResult.HasValue)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"\n[SUCCESS] '{addonId}' has been completely removed.");
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"\n[WARNING] Cleanup completed with errors:");
+            Console.WriteLine($"-> {finalResult.Message}");
+        }
+
+        Console.ResetColor();
+        return finalResult;
+    }
+
+    public static Task<Maybe> HandleListAsync(Action<IReadOnlyList<string>> onResultsFound)
+    {
+        return Maybe.TryAsync(() =>
+        {
+            var pluginsBase = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "JCMU", "Plugins");
+
+            Console.WriteLine("\n--- Installed JCMU Addons ---");
+
+            if (!Directory.Exists(pluginsBase))
+            {
+                Console.WriteLine("No addons currently installed.");
+                onResultsFound(Array.Empty<string>());
+                return Task.FromResult(Maybe.SUCCESS);
+            }
+
+            var manifests = Directory.GetFiles(pluginsBase, "manifest.json", SearchOption.AllDirectories);
+
+            if (manifests.Length == 0)
+            {
+                Console.WriteLine("No addons currently installed.");
+                onResultsFound(Array.Empty<string>());
+                return Task.FromResult(Maybe.SUCCESS);
+            }
+
+            var results = new List<string>();
+            foreach (var manifestPath in manifests)
+            {
+                var addonDir = Path.GetDirectoryName(manifestPath);
+                if (addonDir == null) continue;
+
+                var relativeId = Path.GetRelativePath(pluginsBase, addonDir).Replace('\\', '/');
+                results.Add(relativeId);
+
+                var json = File.ReadAllText(manifestPath);
+                var manifest = System.Text.Json.JsonSerializer.Deserialize<PluginManifest>(json);
+
+                // --- NEW SYMLINK DETECTION ---
+                var dirInfo = new DirectoryInfo(addonDir);
+                if (dirInfo.LinkTarget != null) // .NET 6+ detects Junctions and Symlinks natively!
+                {
+                    bool isBroken = !Directory.Exists(dirInfo.LinkTarget);
+
+                    Console.Write($"[{results.Count}] {relativeId} ");
+
+                    if (isBroken)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine("[BROKEN DEV-LINK]");
+                        Console.ResetColor();
+                        Console.WriteLine($"    Target: {dirInfo.LinkTarget} (Directory not found)");
+                    }
+                    else
+                    {
+                        Console.ForegroundColor = ConsoleColor.Cyan;
+                        Console.WriteLine("[DEV-LINK]");
+                        Console.ResetColor();
+                        Console.WriteLine($"    Target: {dirInfo.LinkTarget}");
+                    }
+                }
+                else
+                {
+                    // Standard Output for normal installs
+                    Console.WriteLine($"[{results.Count}] {relativeId}");
+                    if (manifest != null && !string.IsNullOrWhiteSpace(manifest.RepositoryUrl))
+                        Console.WriteLine($"    {manifest.RepositoryUrl}");
+                    else
+                        Console.WriteLine("    (No repository URL provided in manifest)");
+                }
+
+                Console.WriteLine(); // Blank line for spacing
+            }
+
+            onResultsFound(results);
+            return Task.FromResult(Maybe.SUCCESS);
+        });
+    }
+
+    public async Task<Maybe> HandleSearchAsync(string[] args, Action<Dictionary<int, AddonSearchResult>> onResultsFound)
+    {
+        string? query = null;
+        int page = 1;
+
+        // Parse logic: If the LAST argument is a number, treat it as the page.
+        if (args.Length > 1)
+        {
+            if (int.TryParse(args.Last(), out var parsedPage))
+            {
+                page = parsedPage > 0 ? parsedPage : 1;
+                // Join everything else back together as the query
+                var queryParts = args.Skip(1).Take(args.Length - 2);
+                query = string.Join(" ", queryParts);
+            }
+            else
+            {
+                query = string.Join(" ", args.Skip(1));
+            }
+
+            if (string.IsNullOrWhiteSpace(query)) query = null;
+        }
+
+        Console.WriteLine($"\n--- Searching GitHub{(query != null ? $" for '{query}'" : "")} (Page {page}) ---");
+
+        var result = await _source.SearchAsync(query, page).ConfigureAwait(false);
+
+        return result.Tap(pagedResult =>
+        {
+            var list = pagedResult.Items;
+            var cache = new Dictionary<int, AddonSearchResult>();
+
+            if (list.Count == 0)
+            {
+                Console.WriteLine("No addons found matching that query.");
+                onResultsFound(cache);
+                return;
+            }
+
+            // --- LOCAL STATE DISCOVERY ---
+            var pluginsBase = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "JCMU", "Plugins");
+
+            var localInstallations = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            if (Directory.Exists(pluginsBase))
+            {
+                foreach (var dir in Directory.GetDirectories(pluginsBase))
+                {
+                    var dirInfo = new DirectoryInfo(dir);
+                    var localAddonId = dirInfo.Name;
+
+                    // Attempt to read the version from manifest.json
+                    string versionSuffix = "";
+                    var manifestPath = Path.Combine(dir, "manifest.json");
+                    if (File.Exists(manifestPath))
+                    {
+                        try
+                        {
+                            var json = File.ReadAllText(manifestPath);
+                            var manifest = System.Text.Json.JsonSerializer.Deserialize<PluginManifest>(
+                                json, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+                            if (manifest != null && !string.IsNullOrWhiteSpace(manifest.Version))
+                            {
+                                versionSuffix = $" {manifest.Version}";
+                            }
+                        }
+                        catch { /* Ignore parse errors; version just remains blank */ }
+                    }
+
+                    if (dirInfo.LinkTarget != null) // Native .NET 6+ Junction/Symlink check
+                    {
+                        bool isBroken = !Directory.Exists(dirInfo.LinkTarget);
+                        localInstallations[localAddonId] = isBroken ? $"BROKEN DEV-LINK{versionSuffix}" : $"DEV-LINKED{versionSuffix}";
+                    }
+                    else
+                    {
+                        localInstallations[localAddonId] = $"INSTALLED{versionSuffix}";
+                    }
+                }
+            }
+            // -----------------------------
+
+            int startIndex = (page - 1) * 10 + 1;
+
+            for (int i = 0; i < list.Count; i++)
+            {
+                var displayNum = startIndex + i;
+                cache[displayNum] = list[i];
+
+                bool isTrusted = _trustManager.IsTrusted(list[i].Author);
+
+                Console.Write($"[{displayNum}] {list[i].AddonId} ");
+
+                // Print Trust Tag
+                if (isTrusted)
+                {
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.Write("[TRUSTED]");
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.DarkYellow;
+                    Console.Write("[UNTRUSTED]");
+                }
+
+                // Print Installation Status Tag
+                if (localInstallations.TryGetValue(list[i].AddonId, out var installStatus))
+                {
+                    Console.Write(" "); // Space between tags
+
+                    if (installStatus.StartsWith("INSTALLED"))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Cyan;
+                        Console.Write($"[{installStatus}]");
+                    }
+                    else if (installStatus.StartsWith("DEV-LINKED"))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Magenta;
+                        Console.Write($"[{installStatus}]");
+                    }
+                    else
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.Write($"[{installStatus}]");
+                    }
+                }
+
+                Console.ResetColor();
+                Console.WriteLine(); // Move to the next line for the URL
+
+                // Print the clickable URL
+                Console.WriteLine($"    {list[i].RepositoryUrl}");
+
+                if (!string.IsNullOrEmpty(list[i].Description))
+                    Console.WriteLine($"    {list[i].Description}");
+
+                Console.WriteLine(); // Add a blank line between results for readability
+            }
+
+            onResultsFound(cache);
+
+            // Display paging footer if total results exceed 10
+            if (pagedResult.TotalCount > 10)
+            {
+                int endItem = startIndex + list.Count - 1;
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"{startIndex}-{endItem} of {pagedResult.TotalCount} shown");
+                Console.ResetColor();
+            }
+        }).Bind(x => Maybe.SUCCESS);
+    }
+}
+
+ *****************
+JCMU.ConsoleBed/Cli/ToolCliDispatcher.cs
+ *****************
+
+
+using JinnDev.JCMU.CoreTools;
+using JinnDev.Utilities.Monad;
+using Microsoft.Extensions.Logging;
+
+namespace JinnDev.JCMU.ConsoleBed.Cli;
+
+public class ToolCliDispatcher
+{
+    private readonly IEnumerable<ICoreTool> _tools;
+    private readonly ILogger<ToolCliDispatcher> _logger;
+
+    public ToolCliDispatcher(IEnumerable<ICoreTool> tools, ILogger<ToolCliDispatcher> logger)
+    {
+        _tools = tools;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Executes a core tool. Triggered by Windows Explorer (jcmu.exe tool <ToolId> "%V")
+    /// or by a manual developer CLI command.
+    /// </summary>
+    public async Task<Maybe> HandleToolAsync(string toolId, string targetDirectory)
+    {
+        var tool = _tools.FirstOrDefault(t => t.ToolId.Equals(toolId, StringComparison.OrdinalIgnoreCase));
+
+        if (tool == null)
+            return Maybe.Fail($"Built-in tool '{toolId}' not found.");
+
+        _logger.LogInformation("--- Executing Core Tool: {ToolId} ---", toolId);
+
+        var result = await tool.ExecuteAsync(targetDirectory).ConfigureAwait(false);
+
+        // Pause for errors if running in the visible console
+        if (!result.HasValue && !Console.IsOutputRedirected && Console.WindowHeight > 0)
+        {
+            Console.WriteLine();
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"[TOOL FAILED]: {toolId}");
+            Console.WriteLine(result.Message);
+            if (result.IsExceptionState) Console.WriteLine(result.Exception!.Message);
+            Console.ResetColor();
+            Console.WriteLine("\nPress any key to exit...");
+            Console.ReadKey(true);
+        }
+
+        return result;
+    }
+}
+
+ *****************
+JCMU.ConsoleBed/Execution/IPluginInvoker.cs
+ *****************
+
+
+using JinnDev.Utilities.Monad;
+
+namespace JinnDev.JCMU.ConsoleBed.Execution
+{
+    public interface IPluginInvoker
+    {
+        Task<Maybe<int>> ExecuteAsync(string addonId, string targetDirectory);
+    }
+}
+
+ *****************
+JCMU.ConsoleBed/Execution/PluginInvoker.cs
+ *****************
+
+
+using JinnDev.JCMU.ConsoleBed.Runtime;
+using JinnDev.JCMU.ConsoleBed.Services;
+using JinnDev.JCMU.SDK.Models;
+using JinnDev.Utilities.Monad;
+using Microsoft.Extensions.Logging;
+using System.Runtime.Versioning;
+
+namespace JinnDev.JCMU.ConsoleBed.Execution;
+
+/// <summary>
+/// Orchestrates the lifecycle of an Addon execution: Loading, Executing, and Unloading.
+/// </summary>
+[SupportedOSPlatform("windows")]
+public class PluginInvoker : IPluginInvoker
+{
+    private readonly IPluginLoader _loader;
+    private readonly ILoggerFactory _loggerFactory;
+    private readonly ILogger<PluginInvoker> _logger;
+
+    public PluginInvoker(IPluginLoader loader, ILoggerFactory loggerFactory)
+    {
+        _loader = loader;
+        _loggerFactory = loggerFactory;
+        _logger = loggerFactory.CreateLogger<PluginInvoker>();
+    }
+
+    /// <summary>
+    /// Executes the specified addon against the target directory.
+    /// </summary>
+    /// <param name="addonId">The unique identifier of the installed addon.</param>
+    /// <param name="targetDirectory">The absolute path the user right-clicked on.</param>
+    /// <returns>A monad representing the success or failure of the execution.</returns>
+    public async Task<Maybe<int>> ExecuteAsync(string addonId, string targetDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(targetDirectory) || !Directory.Exists(targetDirectory))
+            return Maybe.None<int>($"Target directory does not exist or is invalid: {targetDirectory}");
+
+        _logger.LogInformation("Invoking Addon '{AddonId}' on target: {TargetDirectory}", addonId, targetDirectory);
+
+        return await _loader.LoadPlugin(addonId)
+            .BindAsync(async loadedPlugin =>
+            {
+                // We use a Try/Finally block inside the BindAsync specifically to guarantee 
+                // that the AssemblyLoadContext is unloaded, even if the Addon throws an unhandled exception.
+                try
+                {
+                    return await ExecuteInternalAsync(addonId, targetDirectory, loadedPlugin).ConfigureAwait(false);
+                }
+                finally
+                {
+                    _logger.LogDebug("Unloading AssemblyLoadContext for '{AddonId}'.", addonId);
+                    loadedPlugin.Context.Unload();
+                }
+            }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The protected inner execution boundary.
+    /// </summary>
+    private async Task<Maybe<int>> ExecuteInternalAsync(string addonId, string targetDirectory, LoadedPlugin loadedPlugin)
+    {
+        // 1. Build the toolbelt for the plugin
+        var hostServices = new HostServices(addonId, _loggerFactory);
+
+        // 2. Build the snapshot of the world
+        var context = new ActionContext { TargetDirectory = targetDirectory, HostServices = hostServices };
+
+        // 3. Double-wrap the execution. 
+        // The SDK demands a Task<Maybe>, but we still wrap it in TryAsync just in case 
+        // the Addon developer wrote logic that throws before they returned their Monad.
+        var executionResult = await Maybe.TryAsync(async () =>
+            await loadedPlugin.AddonInstance.ExecuteAsync(context).ConfigureAwait(false)
+        ).ConfigureAwait(false);
+
+        if (executionResult.HasValue)
+        {
+            _logger.LogInformation("Addon '{AddonId}' execution completed successfully.", addonId);
+        }
+        else
+        {
+            _logger.LogError(executionResult.Exception, "Addon '{AddonId}' execution failed: {Message}", addonId, executionResult.Message);
+        }
+
+        return executionResult;
+    }
+}
+
+ *****************
+JCMU.ConsoleBed/Registry/CoreRegistrar.cs
+ *****************
+
+
+using JinnDev.JCMU.AddonManager.Interfaces;
+using JinnDev.JCMU.CoreTools;
+using JinnDev.Utilities.Monad;
+using Microsoft.Extensions.Logging;
+using System.Runtime.Versioning;
+using WinReg = Microsoft.Win32.Registry;
+
+namespace JinnDev.JCMU.ConsoleBed.Registry;
+
+[SupportedOSPlatform("windows")]
+public class CoreRegistrar
+{
+    private readonly IRegistryManager _registryManager;
+    private readonly IEnumerable<ICoreTool> _coreTools;
+    private readonly ILogger<CoreRegistrar> _logger;
+
+    // The primary hook points in Windows Explorer
+    private readonly string[] _explorerHookPaths =
+    {
+        @"Software\Classes\Directory\Background\shell", // Right-click empty space in a folder
+        @"Software\Classes\Directory\shell"             // Right-click a folder icon
+    };
+
+    public CoreRegistrar(IRegistryManager registryManager, IEnumerable<ICoreTool> coreTools, ILogger<CoreRegistrar> logger)
+    {
+        _registryManager = registryManager;
+        _coreTools = coreTools;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Initializes the Core registry structure. This creates the main "JinnCM" context menu 
+    /// and prepares the cascading subgroups (Git Tools, Code Gen, etc.).
+    /// </summary>
+    public Maybe InitializeCore()
+    {
+        return Maybe.Try(() =>
+        {
+            _logger.LogInformation("Initializing JCMU Core Registry Anchors...");
+
+            var exeDirectory = Path.GetDirectoryName(Environment.ProcessPath) ?? "";
+            var coreExePath = Environment.ProcessPath ?? throw new Exception("Cannot determine process path.");
+            var iconPath = Path.Combine(exeDirectory, "Icons", "jinn.ico");
+            var finalIconValue = File.Exists(iconPath) ? iconPath : "shell32.dll,-16764";
+
+            foreach (var hookPath in _explorerHookPaths)
+            {
+                using var hookKey = WinReg.CurrentUser.CreateSubKey($@"{hookPath}\JCMU_Core");
+                hookKey.SetValue("MUIVerb", "JinnCM");
+                hookKey.SetValue("ExtendedSubCommandsKey", "JCMU_Menu");
+                hookKey.SetValue("Icon", finalIconValue);
+            }
+
+            using var rootStore = WinReg.CurrentUser.CreateSubKey(@"Software\Classes\JCMU_Menu\shell");
+
+            // Automatically write all injected Core Tools!
+            foreach (var tool in _coreTools)
+            {
+                var modifiedMenu = tool.Menu with { Category = "JCMU Tools" };
+                var result = _registryManager.RegisterAddon(tool.ToolId, modifiedMenu, coreExePath, isCoreTool: true);
+
+                if (!result.HasValue)
+                    _logger.LogWarning("Failed to register built-in tool {ToolId}: {Message}", tool.ToolId, result.Message);
+            }
+
+            _logger.LogInformation("Core registry initialization successful.");
+        });
+    }
+
+    /// <summary>
+    /// Cleans up all Core registry hooks and deletes the JCMU tree. 
+    /// Use this if you are completely uninstalling JCMU from your machine.
+    /// </summary>
+    public Maybe TeardownCore()
+    {
+        return Maybe.Try(() =>
+        {
+            _logger.LogInformation("Tearing down JCMU Core Registry Anchors...");
+
+            // Remove the UI Hooks
+            foreach (var hookPath in _explorerHookPaths)
+            {
+                using var hookKey = WinReg.CurrentUser.OpenSubKey(hookPath, writable: true);
+                hookKey?.DeleteSubKeyTree("JCMU_Core", throwOnMissingSubKey: false);
+            }
+
+            // Remove all generated Backing Stores
+            using var classesKey = WinReg.CurrentUser.OpenSubKey(@"Software\Classes", writable: true);
+            if (classesKey != null)
+            {
+                // Delete the root
+                classesKey.DeleteSubKeyTree("JCMU_Menu", throwOnMissingSubKey: false);
+
+                classesKey.DeleteSubKeyTree("JCMU_Tools", throwOnMissingSubKey: false);
+
+                // Delete all dynamic categories created by addons
+                var dynamicKeys = classesKey.GetSubKeyNames()
+                    .Where(k => k.StartsWith("JCMU_Category_", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                foreach (var key in dynamicKeys)
+                {
+                    classesKey.DeleteSubKeyTree(key, throwOnMissingSubKey: false);
+                }
+            }
+        });
+    }
+}
+
+ *****************
+JCMU.ConsoleBed/Registry/RegistryManager.cs
+ *****************
+
+
+using JinnDev.JCMU.AddonManager.Interfaces;
+using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.JCMU.CoreTools;
+using JinnDev.Utilities.Monad;
+using Microsoft.Extensions.Logging;
+using System.Runtime.Versioning;
+using WinReg = Microsoft.Win32.Registry;
+
+namespace JinnDev.JCMU.ConsoleBed.Registry;
+
+[SupportedOSPlatform("windows")]
+public class RegistryManager : IRegistryManager
+{
+    private readonly ILogger<RegistryManager> _logger;
+
+    public RegistryManager(ILogger<RegistryManager> logger)
+    {
+        _logger = logger;
+    }
+
+    public Maybe RegisterAddon(string addonId, MenuDefinition menu, string coreExePath, bool isCoreTool = false)
+    {
+        return Maybe.Try(() =>
+        {
+            _logger.LogInformation("Writing registry keys for Addon: {AddonId}", addonId);
+
+            // Determine Base Path dynamically
+            var basePath = @"Software\Classes\JCMU_Menu\shell";
+
+            if (!string.IsNullOrWhiteSpace(menu.Category))
+            {
+                basePath = EnsureDynamicCategoryExists(menu.Category);
+            }
+
+            using Microsoft.Win32.RegistryKey baseKey = WinReg.CurrentUser.CreateSubKey(basePath);
+
+            // Format the key name with Ordinal to ensure Windows sorts the menu correctly
+            var rootKeyName = $"{menu.Ordinal:D3}_{addonId}";
+
+            WriteMenuNode(baseKey, rootKeyName, menu, coreExePath, addonId, isCoreTool);
+        });
+    }
+
+    // Creates the folder anchor on the fly if it doesn't exist
+    private static string EnsureDynamicCategoryExists(string categoryName)
+    {
+        var safeKey = new string(categoryName.Where(char.IsLetterOrDigit).ToArray());
+
+        // Check if it's the Core Tools folder. If so, force it to the bottom with 'z_'
+        bool isCoreTools = categoryName.Equals("JCMU Tools", StringComparison.OrdinalIgnoreCase);
+        var categoryKeyName = isCoreTools ? "z_JCMUTools" : $"JCMU_Category_{safeKey}";
+
+        using var rootStore = WinReg.CurrentUser.CreateSubKey(@"Software\Classes\JCMU_Menu\shell");
+        using var anchorKey = rootStore.CreateSubKey(categoryKeyName);
+
+        anchorKey.SetValue("MUIVerb", categoryName);
+        anchorKey.SetValue("ExtendedSubCommandsKey", categoryKeyName);
+
+        // Apply the special styling to the Core folder
+        if (isCoreTools)
+        {
+            anchorKey.SetValue("Icon", "imageres.dll,-114"); // Gear icon
+            anchorKey.SetValue("CommandFlags", 0x20, Microsoft.Win32.RegistryValueKind.DWord); // Horizontal Line
+        }
+
+        var categoryBackingStore = $@"Software\Classes\{categoryKeyName}\shell";
+        using var _ = WinReg.CurrentUser.CreateSubKey(categoryBackingStore);
+
+        return categoryBackingStore;
+    }
+
+    public Maybe UnregisterAddon(string addonId)
+    {
+        return Maybe.Try(() =>
+        {
+            _logger.LogInformation("Removing registry keys for Addon: {AddonId}", addonId);
+
+            using var classesKey = WinReg.CurrentUser.OpenSubKey(@"Software\Classes", writable: true);
+            if (classesKey == null) return;
+
+            // 1. Cleanup from the Root Menu
+            using var rootKey = classesKey.OpenSubKey(@"JCMU_Menu\shell", writable: true);
+            if (rootKey != null)
+            {
+                DeleteKeysEndingWith(rootKey, addonId);
+            }
+
+            // 2. Cleanup from all Dynamic Categories
+            var categoryKeys = classesKey.GetSubKeyNames()
+                .Where(k => k.StartsWith("JCMU_Category_", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            foreach (var categoryName in categoryKeys)
+            {
+                using var categoryShellKey = classesKey.OpenSubKey($@"{categoryName}\shell", writable: true);
+                if (categoryShellKey != null)
+                {
+                    DeleteKeysEndingWith(categoryShellKey, addonId);
+                }
+
+                // If the category is now empty, delete the category folder entirely!
+                using var checkKey = classesKey.OpenSubKey($@"{categoryName}\shell");
+                if (checkKey != null && checkKey.SubKeyCount == 0)
+                {
+                    classesKey.DeleteSubKeyTree(categoryName, throwOnMissingSubKey: false);
+                    rootKey?.DeleteSubKeyTree(categoryName, throwOnMissingSubKey: false);
+                }
+            }
+
+            // 3. Cleanup any generated ExtendedSubCommandsKeys (Nested menus)
+            var subCommandPrefix = $"JCMU_Sub_{addonId}";
+            var orphanedKeys = classesKey.GetSubKeyNames()
+                .Where(k => k.StartsWith(subCommandPrefix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            foreach (var orphan in orphanedKeys)
+            {
+                classesKey.DeleteSubKeyTree(orphan, throwOnMissingSubKey: false);
+            }
+        });
+    }
+
+    private static void DeleteKeysEndingWith(Microsoft.Win32.RegistryKey parentKey, string suffix)
+    {
+        var targets = parentKey.GetSubKeyNames()
+            .Where(k => k.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        foreach (var t in targets)
+        {
+            parentKey.DeleteSubKeyTree(t, throwOnMissingSubKey: false);
+        }
+    }
+
+    /// <summary>
+    /// Recursively walks the MenuDefinition to create nested registry structures.
+    /// </summary>
+    private static void WriteMenuNode(Microsoft.Win32.RegistryKey parentKey, string keyName, MenuDefinition menu, string coreExePath, string addonId, bool isCoreTool)
+    {
+        using var itemKey = parentKey.CreateSubKey(keyName);
+        itemKey.SetValue("MUIVerb", menu.MenuItemName);
+
+        if (!string.IsNullOrWhiteSpace(menu.IconPath))
+        {
+            itemKey.SetValue("Icon", menu.IconPath);
+        }
+
+        if (menu.SubItems != null && menu.SubItems.Any())
+        {
+            var extSubKeyName = $"JCMU_Sub_{addonId}_{keyName}";
+            itemKey.SetValue("ExtendedSubCommandsKey", extSubKeyName);
+
+            using var subRootKey = WinReg.CurrentUser.CreateSubKey($@"Software\Classes\{extSubKeyName}\shell");
+
+            foreach (var child in menu.SubItems)
+            {
+                var childKeyName = $"{child.Ordinal:D3}_{Guid.NewGuid():N}";
+                WriteMenuNode(subRootKey, childKeyName, child, coreExePath, addonId, isCoreTool);
+            }
+        }
+        else
+        {
+            using var cmdKey = itemKey.CreateSubKey("command");
+
+            // --- THE MASTERY LOGIC ---
+            string targetExe = coreExePath;
+
+            if (menu.RunInBackground)
+            {
+                // Swap "jcmu.exe" for "jcmu-bg.exe"
+                var directory = Path.GetDirectoryName(coreExePath)!;
+                targetExe = Path.Combine(directory, "jcmu-bg.exe");
+            }
+
+            var backgroundFlag = menu.RunInBackground ? " -b" : "";
+
+            // --- THE FIX ---
+            // If it's a core tool, use the 'tool' verb. Otherwise, use 'execute'.
+            var cliVerb = isCoreTool ? "tool" : "execute";
+            var commandString = $"\"{targetExe}\" {cliVerb} {addonId}{backgroundFlag} \"%V\"";
+
+            cmdKey.SetValue("", commandString);
+        }
+    }
+}
+
+ *****************
+JCMU.ConsoleBed/Runtime/IPluginLoader.cs
+ *****************
+
+
+using JinnDev.Utilities.Monad;
+
+namespace JinnDev.JCMU.ConsoleBed.Runtime
+{
+    public interface IPluginLoader
+    {
+        Maybe<LoadedPlugin> LoadPlugin(string addonId);
+    }
+}
+
+ *****************
+JCMU.ConsoleBed/Runtime/PluginLoadContext.cs
+ *****************
+
+
+using System.Reflection;
+using System.Runtime.Loader;
+
+namespace JinnDev.JCMU.ConsoleBed.Runtime;
+
+/// <summary>
+/// A specialized memory isolation container for JCMU Addons.
+/// Ensures that an addon's dependencies are loaded from its specific installation folder,
+/// preventing DLL Hell and version conflicts with the Core engine or other addons.
+/// </summary>
+public class PluginLoadContext : AssemblyLoadContext
+{
+    private readonly AssemblyDependencyResolver _resolver;
+
+    /// <summary>
+    /// Initializes a new Load Context for a specific addon.
+    /// </summary>
+    /// <param name="pluginPath">The absolute path to the addon's primary compiled DLL.</param>
+    public PluginLoadContext(string pluginPath)
+        // isCollectible: true allows this entire memory space to be unloaded and garbage collected
+        // after the addon finishes executing, freeing up system RAM.
+        : base(isCollectible: true)
+    {
+        // The resolver parses the .deps.json file generated by 'dotnet publish'
+        // to understand exactly which dependencies the addon was compiled against.
+        _resolver = new AssemblyDependencyResolver(pluginPath);
+    }
+
+    /// <summary>
+    /// Overrides the default .NET assembly resolution behavior.
+    /// When the addon asks for a type (e.g., "Newtonsoft.Json"), this method is triggered.
+    /// </summary>
+    protected override Assembly? Load(AssemblyName assemblyName)
+    {
+        // Check if the Core (Default context) already has this assembly loaded.
+        // This effectively "Auto-shares" the SDK, Monads, and even standard 
+        // Microsoft extensions like Logging or DI if the Core is using them.
+        var alreadyLoaded = AssemblyLoadContext.Default.Assemblies
+            .FirstOrDefault(a => a.GetName().Name == assemblyName.Name);
+
+        if (alreadyLoaded != null)
+        {
+            return null; // Defer to the Core's version
+        }
+
+        // Check if the requested assembly exists in the addon's specific folder.
+        string? assemblyPath = _resolver.ResolveAssemblyToPath(assemblyName);
+
+        if (assemblyPath != null)
+        {
+            // If we found it locally, load it directly into this isolated context.
+            return LoadFromAssemblyPath(assemblyPath);
+        }
+
+        // If it's not in the addon's folder, fallback to the default .NET load context.
+        // This is necessary so the addon can resolve shared framework libraries (System.Linq, etc.)
+        // and our shared contract (JCMU.SDK).
+        return null;
+    }
+
+    /// <summary>
+    /// Overrides the resolution of native, unmanaged libraries (e.g., C++ DLLs).
+    /// </summary>
+    protected override IntPtr LoadUnmanagedDll(string unmanagedDllName)
+    {
+        string? libraryPath = _resolver.ResolveUnmanagedDllToPath(unmanagedDllName);
+
+        if (libraryPath != null)
+        {
+            return LoadUnmanagedDllFromPath(libraryPath);
+        }
+
+        return IntPtr.Zero;
+    }
+}
+
+ *****************
+JCMU.ConsoleBed/Runtime/PluginLoader.cs
+ *****************
+
+
+using System.Reflection;
+using JinnDev.JCMU.SDK.Interfaces;
+using JinnDev.Utilities.Monad;
+using Microsoft.Extensions.Logging;
+
+namespace JinnDev.JCMU.ConsoleBed.Runtime;
+
+/// <summary>
+/// Provides a clean tuple for returning both the instantiated addon and its memory sandbox,
+/// so the orchestrator can execute the addon and subsequently unload the memory.
+/// </summary>
+public record LoadedPlugin(IJcmuAddon AddonInstance, PluginLoadContext Context);
+
+/// <summary>
+/// Responsible for dynamically loading compiled JCMU Addons into isolated memory spaces
+/// and instantiating their primary logic classes.
+/// </summary>
+public class PluginLoader : IPluginLoader
+{
+    private readonly ILogger<PluginLoader> _logger;
+
+    public PluginLoader(ILogger<PluginLoader> logger)
+    {
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Loads an installed addon into an isolated AssemblyLoadContext.
+    /// </summary>
+    /// <param name="addonId">The unique identifier of the installed addon.</param>
+    /// <returns>A monad containing the instantiated addon and its memory context.</returns>
+    public Maybe<LoadedPlugin> LoadPlugin(string addonId)
+    {
+        return Maybe.Try<LoadedPlugin>(() =>
+        {
+            var pluginPath = GetPluginDllPath(addonId);
+
+            _logger.LogDebug("Spinning up AssemblyLoadContext for {AddonId} at {Path}", addonId, pluginPath);
+
+            var loadContext = new PluginLoadContext(pluginPath);
+
+            // Load the primary assembly into the new isolated context
+            var assembly = loadContext.LoadFromAssemblyPath(pluginPath);
+
+            var addonInstance = InstantiateAddon(assembly, addonId);
+
+            return new LoadedPlugin(addonInstance, loadContext);
+        });
+    }
+
+    /// <summary>
+    /// Locates the exact path of the primary .dll file in the ProgramData plugin directory.
+    /// </summary>
+    private static string GetPluginDllPath(string addonId)
+    {
+        var targetDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "JCMU", "Plugins", addonId);
+
+        if (!Directory.Exists(targetDirectory))
+        {
+            throw new DirectoryNotFoundException($"Addon '{addonId}' is not installed (Directory not found).");
+        }
+
+        // The AddonBuilder in Phase 2 should have produced a DLL named after the AddonId or the csproj.
+        // We look for any .dll that might contain the Addon logic.
+        var dllFiles = Directory.GetFiles(targetDirectory, "*.dll");
+
+        if (dllFiles.Length == 0)
+        {
+            throw new FileNotFoundException($"No compiled .dll files found in {targetDirectory}.");
+        }
+
+        // Heuristic: Prefer a DLL whose name matches the AddonId, otherwise just grab the first one
+        // and let Reflection figure out if it contains the IJcmuAddon interface.
+        var primaryDll = dllFiles.FirstOrDefault(f => Path.GetFileNameWithoutExtension(f).Equals(addonId, StringComparison.OrdinalIgnoreCase))
+                         ?? dllFiles[0];
+
+        return primaryDll;
+    }
+
+    /// <summary>
+    /// Uses Reflection to find the specific class implementing IJcmuAddon and creates an instance of it.
+    /// </summary>
+    private static IJcmuAddon InstantiateAddon(Assembly assembly, string addonId)
+    {
+        try
+        {
+            // Find any public, non-abstract class that implements IJcmuAddon
+            var interfaceType = typeof(IJcmuAddon);
+            var addonType = assembly.GetTypes().FirstOrDefault(t =>
+                interfaceType.IsAssignableFrom(t) &&
+                t is { IsInterface: false, IsAbstract: false });
+
+            if (addonType == null)
+            {
+                throw new Exception($"The loaded assembly for '{addonId}' does not contain any class implementing {nameof(IJcmuAddon)}.");
+            }
+
+            // Instantiate using the parameterless constructor
+            var instance = Activator.CreateInstance(addonType) as IJcmuAddon;
+
+            if (instance == null)
+            {
+                throw new Exception($"Failed to instantiate the class '{addonType.Name}' for addon '{addonId}'. Ensure it has a public, parameterless constructor.");
+            }
+
+            return instance;
+        }
+        catch (ReflectionTypeLoadException ex)
+        {
+            // Safely extract whatever loader exceptions exist
+            var loaderErrors = ex.LoaderExceptions
+                .Where(e => e != null)
+                .Select(e => e!.Message)
+                .Distinct()
+                .ToList();
+
+            var errorDetails = loaderErrors.Any()
+                ? string.Join("\n  -> ", loaderErrors)
+                : ex.Message;
+
+            throw new Exception(
+                $"SDK Compatibility Error.\n" +
+                $"This addon is likely built for an older/incompatible version of the JCMU SDK and needs to be updated by its author.\n" +
+                $"Details: {errorDetails}", ex);
+        }
+        catch (Exception ex)
+        {
+            throw new Exception($"Failed to load addon. It might be incompatible with this version of JCMU.\nDetails: {ex.Message}", ex);
+        }
+    }
+}
+
+ *****************
+JCMU.ConsoleBed/Services/AddonSettings.cs
+ *****************
+
+
+using System.Runtime.Versioning;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using JinnDev.JCMU.SDK.Interfaces;
+using JinnDev.Utilities.Monad;
+
+namespace JinnDev.JCMU.ConsoleBed.Services;
+
+[SupportedOSPlatform("windows")]
+public class AddonSettings : IAddonSettings
+{
+    private readonly string _configFilePath;
+    private readonly SemaphoreSlim _fileLock = new(1, 1);
+
+    // We use a specific entropy to add a slight extra layer of obfuscation
+    private readonly byte[] _entropy = Encoding.UTF8.GetBytes("JCMU_Addon_Secret_Salt");
+
+    public AddonSettings(string addonId)
+    {
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        _configFilePath = Path.Combine(localAppData, "JCMU", "Configs", $"{addonId}.json");
+    }
+
+    public Task<Maybe<T>> GetValueAsync<T>(string key)
+    {
+        return LoadSettingsAsync().BindAsync(settings =>
+        {
+            if (!settings.Values.TryGetValue(key, out var jsonElement))
+                return Task.FromResult(Maybe<T>.None($"Setting '{key}' not found."));
+
+            try
+            {
+                var value = jsonElement.Deserialize<T>();
+                return Task.FromResult(value != null
+                    ? Maybe<T>.Some(value)
+                    : Maybe<T>.None($"Setting '{key}' was found but deserialized to null."));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Maybe<T>.None($"Failed to deserialize setting '{key}' to type {typeof(T).Name}: {ex.Message}"));
+            }
+        });
+    }
+
+    public Task<Maybe> SetValueAsync<T>(string key, T value)
+    {
+        return LoadSettingsAsync().BindAsync(settings =>
+        {
+            var jsonElement = JsonSerializer.SerializeToElement(value);
+            settings.Values[key] = jsonElement;
+            return SaveSettingsAsync(settings);
+        });
+    }
+
+    public Task<Maybe<string>> GetSecretAsync(string key)
+    {
+        return LoadSettingsAsync().BindAsync(settings => Maybe.Try(() =>
+        {
+            if (!settings.Secrets.TryGetValue(key, out var encryptedBase64))
+                return Maybe<string>.None($"Secret '{key}' not found.");
+
+            var encryptedBytes = Convert.FromBase64String(encryptedBase64);
+
+            // DPAPI Decryption: Will fail if a different Windows User tries to decrypt it
+            var decryptedBytes = ProtectedData.Unprotect(encryptedBytes, _entropy, DataProtectionScope.CurrentUser);
+            return Encoding.UTF8.GetString(decryptedBytes);
+        }));
+    }
+
+    public Task<Maybe> SetSecretAsync(string key, string value)
+    {
+        return LoadSettingsAsync().BindAsync(settings => Maybe.TryAsync(async () =>
+        {
+            var plaintextBytes = Encoding.UTF8.GetBytes(value);
+
+            // DPAPI Encryption: Tied directly to the logged-in Windows User Profile
+            var encryptedBytes = ProtectedData.Protect(plaintextBytes, _entropy, DataProtectionScope.CurrentUser);
+            var encryptedBase64 = Convert.ToBase64String(encryptedBytes);
+
+            settings.Secrets[key] = encryptedBase64;
+
+            return await SaveSettingsAsync(settings).ConfigureAwait(false);
+        }));
+    }
+
+    // --- Private IO & State Handling ---
+
+    private Task<Maybe<SettingsStore>> LoadSettingsAsync()
+    {
+        return Maybe.TryAsync(async () =>
+        {
+            await _fileLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (!File.Exists(_configFilePath))
+                    return Maybe<SettingsStore>.Some(new SettingsStore());
+
+                var json = await File.ReadAllTextAsync(_configFilePath).ConfigureAwait(false);
+                var store = JsonSerializer.Deserialize<SettingsStore>(json) ?? new SettingsStore();
+                return Maybe<SettingsStore>.Some(store);
+            }
+            finally
+            {
+                _fileLock.Release();
+            }
+        });
+    }
+
+    private Task<Maybe> SaveSettingsAsync(SettingsStore store)
+    {
+        return Maybe.TryAsync(async () =>
+        {
+            await _fileLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(_configFilePath)!);
+                var json = JsonSerializer.Serialize(store, new JsonSerializerOptions { WriteIndented = true });
+                await File.WriteAllTextAsync(_configFilePath, json).ConfigureAwait(false);
+                return Maybe.SUCCESS;
+            }
+            finally
+            {
+                _fileLock.Release();
+            }
+        });
+    }
+
+    // DTO for JSON Serialization
+    private class SettingsStore
+    {
+        public Dictionary<string, JsonElement> Values { get; set; } = new();
+        public Dictionary<string, string> Secrets { get; set; } = new();
+    }
+}
+
+ *****************
+JCMU.ConsoleBed/Services/HostLogger.cs
+ *****************
+
+
+using JinnDev.JCMU.SDK.Interfaces;
+using JinnDev.Utilities.Monad;
+using Microsoft.Extensions.Logging;
+
+namespace JinnDev.JCMU.ConsoleBed.Services;
+
+/// <summary>
+/// A standardized logger provided to addons during execution.
+/// Prefixes all logs with the addon's identity to ensure clear origin tracking in the console.
+/// </summary>
+public class HostLogger : IPluginLogger
+{
+    private readonly string _addonPrefix;
+    private readonly ILogger _logger;
+
+    public HostLogger(string addonId, ILogger logger)
+    {
+        _addonPrefix = $"[{addonId}]";
+        _logger = logger;
+    }
+
+    public Maybe LogInfo(string message)
+    {
+        return Maybe.Try(() =>
+        {
+            _logger.LogInformation("{Message}", message);
+        });
+    }
+
+    public Maybe LogWarning(string message)
+    {
+        return Maybe.Try(() =>
+        {
+            _logger.LogWarning("{AddonPrefix} {Message}", _addonPrefix, message);
+        });
+    }
+
+    public Maybe LogError(string message, Exception? ex = null)
+    {
+        return Maybe.Try(() =>
+        {
+            if (ex == null)
+            {
+                _logger.LogError("{AddonPrefix} {Message}", _addonPrefix, message);
+            }
+            else
+            {
+                _logger.LogError(ex, "{AddonPrefix} {Message}", _addonPrefix, message);
+            }
+        });
+    }
+}
+
+ *****************
+JCMU.ConsoleBed/Services/HostServices.cs
+ *****************
+
+
+using JinnDev.JCMU.SDK.Interfaces;
+using JinnDev.Utilities.Monad;
+using Microsoft.Extensions.Logging;
+using System.Runtime.Versioning;
+
+namespace JinnDev.JCMU.ConsoleBed.Services;
+
+/// <summary>
+/// The concrete implementation of the SDK's IHostServices.
+/// Handed to the Addon during execution to provide safe interaction with the core environment.
+/// </summary>
+[SupportedOSPlatform("windows")]
+public partial class HostServices : IHostServices
+{
+    public IPluginLogger Logger { get; }
+    public IAddonSettings Settings { get; }
+
+    public HostServices(string addonId, ILoggerFactory loggerFactory)
+    {
+        var coreLogger = loggerFactory.CreateLogger("JCMU.PluginRuntime");
+        Logger = new HostLogger(addonId, coreLogger);
+        Settings = new AddonSettings(addonId);
+    }
+
+    public Task<Maybe<string>> PromptUserAsync(string message)
+    {
+        return Maybe.TryAsync<string>(() =>
+        {
+            Console.WriteLine();
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.Write($"{message} ");
+            Console.ResetColor();
+
+            var input = Console.ReadLine();
+
+            if (string.IsNullOrWhiteSpace(input))
+            {
+                return Task.FromResult(Maybe.None<string>("User provided empty input."));
+            }
+
+            return Task.FromResult(Maybe.Some(input));
+        });
+    }
+}
+
+ *****************
+JCMU.CoreTools/JCMU.CoreTools.csproj
+ *****************
+
+
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<SupportedOSPlatform>windows</SupportedOSPlatform>
+		<LangVersion>12</LangVersion>
+		<RootNamespace>JinnDev.$(MSBuildProjectName.Replace(" ", "_"))</RootNamespace>
+		<AssemblyName>JinnDev.$(MSBuildProjectName.Replace(" ", "_"))</AssemblyName>
+		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Authors>JinnDev</Authors>
+		<Company>Jinn Studios</Company>
+		<Product>Jinn Context Menu Utility Addon Manager</Product>
+		<Nullable>enable</Nullable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\JCMU.AddonManager\JCMU.AddonManager.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="JinnDev.Utilities.CommandLine" Version="8.0.4" />
+	</ItemGroup>
+
+</Project>
+
+ *****************
+JCMU.CoreTools/ICoreTool.cs
+ *****************
+
+
+using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.Utilities.Monad;
+
+namespace JinnDev.JCMU.CoreTools;
+
+/// <summary>
+/// Defines a built-in JCMU utility. Unlike third-party addons, Core Tools run 
+/// directly within the primary application context and bypass memory isolation, 
+/// granting them direct access to internal Dependency Injection services.
+/// </summary>
+public interface ICoreTool
+{
+    /// <summary>
+    /// The unique system identifier for this tool (e.g., "Core.DevLink").
+    /// Used for internal routing.
+    /// </summary>
+    string ToolId { get; }
+
+    /// <summary>
+    /// Defines exactly how this tool should appear in the Windows Right-Click menu.
+    /// </summary>
+    MenuDefinition Menu { get; }
+
+    /// <summary>
+    /// Executes the primary logic of the core tool.
+    /// </summary>
+    /// <param name="targetDirectory">The absolute path of the directory the user right-clicked on.</param>
+    /// <returns>A monad representing the success or failure of the execution.</returns>
+    Task<Maybe> ExecuteAsync(string targetDirectory);
+}
+
+ *****************
+JCMU.CoreTools/DevLink/DevLinkTool.cs
+ *****************
+
+
+using JinnDev.JCMU.AddonManager.Interfaces;
+using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.Utilities.CommandLine;
+using JinnDev.Utilities.Monad;
+using System.Diagnostics;
+using System.Text.Json;
+
+namespace JinnDev.JCMU.CoreTools.DevLink;
+
+public class DevLinkTool : ICoreTool
+{
+    private readonly IRegistryManager _registryManager;
+    private readonly IStatelessRunner _cmdRunner;
+
+    private static readonly string PluginsBase = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "JCMU", "Plugins");
+
+    public string ToolId => "Core.DevLink";
+
+    public MenuDefinition Menu => new MenuDefinition
+    {
+        MenuItemName = "Install Addon Locally (Dev Link)",
+        IconPath = "imageres.dll,-163", // Windows Installation Box
+        Ordinal = 20,
+        RunInBackground = false // We want the console to appear so they see success/errors
+    };
+
+    public DevLinkTool(IRegistryManager registryManager, IStatelessRunner cmdRunner)
+    {
+        _registryManager = registryManager;
+        _cmdRunner = cmdRunner;
+    }
+
+    public Task<Maybe> ExecuteAsync(string targetDirectory)
+    {
+        return Maybe.Try(() =>
+        {
+            var searchDir = Path.GetFullPath(targetDirectory.Trim('"'));
+            return Directory.Exists(searchDir)
+                ? Maybe<string>.Some(searchDir)
+                : Maybe<string>.None($"Directory not found: {searchDir}");
+        })
+        .Bind(searchDir =>
+        {
+            Console.WriteLine($"\n--- Scanning for compiled Addon in: {searchDir} ---");
+
+            var manifestFiles = Directory.GetFiles(searchDir, "manifest.json", SearchOption.AllDirectories)
+                .Where(f => f.Contains(@"\bin\", StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .ToList();
+
+            return manifestFiles.Any()
+                ? Maybe<string>.Some(manifestFiles.First())
+                : Maybe<string>.None(
+                    "Could not find a compiled 'manifest.json' in any 'bin' directory.\n" +
+                    " -> Did you build the project in Visual Studio first?\n" +
+                    " -> Is 'manifest.json' set to 'Copy to Output Directory' in your project properties?");
+        })
+        .BindAsync(async targetManifestPath =>
+        {
+            var outputDir = Path.GetDirectoryName(targetManifestPath)!;
+            var json = await File.ReadAllTextAsync(targetManifestPath).ConfigureAwait(false);
+            var manifest = JsonSerializer.Deserialize<PluginManifest>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+            return manifest != null
+                ? Maybe<(PluginManifest Manifest, string OutputDir)>.Some((manifest, outputDir))
+                : Maybe<(PluginManifest Manifest, string OutputDir)>.None("Failed to parse manifest.json.");
+        })
+        .BindAsync(ctx =>
+        {
+            var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.AddonId);
+            if (Directory.Exists(finalPluginDirectory))
+                Directory.Delete(finalPluginDirectory, true);
+
+            Directory.CreateDirectory(PluginsBase);
+            return Maybe<(PluginManifest Manifest, string OutputDir)>.Some(ctx);
+        })
+        .BindAsync(ctx =>
+        {
+            var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.AddonId);
+            var request = CommandBuilder.Create("mklink")
+                .WithArgument("/J")
+                .WithQuotedArgument(finalPluginDirectory)
+                .WithQuotedArgument(ctx.OutputDir)
+                .Build();
+
+            return _cmdRunner.RunBufferedAsync(request)
+                .BindAsync(cmd => cmd.ExitCode == 0
+                    ? Maybe.SUCCESS
+                    : Maybe.Fail($"Failed to create Directory Junction: {cmd.StandardError}\n{cmd.StandardOutput}"))
+                .WithValueAsync(ctx);
+        })
+        .BindAsync(ctx =>
+        {
+            var coreExePath = Process.GetCurrentProcess().MainModule?.FileName;
+            if (coreExePath == null)
+                return Maybe<(PluginManifest Manifest, string OutputDir)>.None("Could not determine the executing Core EXE path.");
+
+            return _registryManager.RegisterAddon(ctx.Manifest.AddonId, ctx.Manifest.Menu, coreExePath)
+                .WithValue(ctx);
+        })
+        .TapAsync(ctx =>
+        {
+            var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.AddonId);
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"\n[SUCCESS] '{ctx.Manifest.AddonId}' is now Dev-Linked!");
+            Console.WriteLine($"Junction: {finalPluginDirectory} -> {ctx.OutputDir}");
+            Console.WriteLine("Any rebuilds in Visual Studio will be instantly available in the right-click menu.");
+            Console.ResetColor();
+        })
+        .BindAsync(_ => Maybe.SUCCESS);
+    }
+}
+
+
+ *****************
+JCMU.CoreTools/DevLink/DevUnlinkTool.cs
+ *****************
+
+
+using JinnDev.JCMU.AddonManager.Interfaces;
+using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.Utilities.Monad;
+using System.Runtime.Versioning;
+
+namespace JinnDev.JCMU.CoreTools.DevLink;
+
+[SupportedOSPlatform("windows")]
+public class DevUnlinkTool : ICoreTool
+{
+    private readonly IRegistryManager _registryManager;
+
+    private static readonly string PluginsBase = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "JCMU", "Plugins");
+
+    public string ToolId => "Core.DevUnlink";
+
+    public MenuDefinition Menu => new MenuDefinition
+    {
+        // Note: We likely won't show this in the right-click menu because it targets an AddonId,
+        // but it's here to satisfy the ICoreTool interface.
+        MenuItemName = "Remove Dev Link",
+        IconPath = "imageres.dll,-89", // Trash/Remove icon
+        Ordinal = 999,
+        RunInBackground = false
+    };
+
+    public DevUnlinkTool(IRegistryManager registryManager)
+    {
+        _registryManager = registryManager;
+    }
+
+    /// <param name="targetDirectory">In the case of Unlink, this parameter is treated as the AddonId.</param>
+    public Task<Maybe> ExecuteAsync(string targetDirectory)
+    {
+        return Task.FromResult(Maybe.Try(() =>
+        {
+            var addonId = targetDirectory.Trim();
+            if (string.IsNullOrWhiteSpace(addonId))
+                return Maybe.Fail("No Addon ID provided for unlinking.");
+
+            Console.WriteLine($"\n--- Unlinking Dev Addon: {addonId} ---");
+
+            var targetPath = Path.Combine(PluginsBase, addonId);
+
+            if (!Directory.Exists(targetPath))
+                return Maybe.Fail($"No dev-linked addon found with ID '{addonId}'.");
+
+            // 1. Unregister from Windows Explorer Registry
+            var registryResult = _registryManager.UnregisterAddon(addonId);
+            if (!registryResult.HasValue)
+                return registryResult;
+
+            // 2. Remove the Directory Junction
+            // Safety: recursive=false ensures we only delete the link, NOT the developer's source code!
+            Directory.Delete(targetPath, recursive: false);
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"\n[SUCCESS] Dev-Link for '{addonId}' has been removed.");
+            Console.ResetColor();
+
+            return Maybe.SUCCESS;
+        }));
+    }
+}
+
+ *****************
+JCMU.CoreTools/Publish/PublishContext.cs
+ *****************
+
+
+using JinnDev.JCMU.AddonManager.Models;
+
+namespace JinnDev.JCMU.CoreTools.Tools;
+
+internal record PublishContext
+{
+    public required string TargetDirectory { get; init; }
+    public string ProjectFilePath { get; init; } = string.Empty;
+    public string ManifestFilePath { get; init; } = string.Empty;
+    public PluginManifest? Manifest { get; init; }
+    public string InitialVersion { get; init; } = string.Empty;
+
+    // Stubs for Step 2 properties
+    public string Owner { get; init; } = string.Empty;
+    public string Repo { get; init; } = string.Empty;
+    public string FinalVersion { get; init; } = string.Empty;
+}
+
+
+ *****************
+JCMU.CoreTools/Publish/PublishTool.cs
+ *****************
+
+
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.Utilities.CommandLine;
+using JinnDev.Utilities.Monad;
+
+namespace JinnDev.JCMU.CoreTools.Tools;
+
+public class PublishTool : ICoreTool
+{
+    private readonly IStatelessRunner _cmdRunner;
+
+    public string ToolId => "Core.Publish";
+
+    public MenuDefinition Menu => new MenuDefinition
+    {
+        MenuItemName = "Publish Addon to GitHub",
+        IconPath = "imageres.dll,-104", // Standard sync/update icon
+        Ordinal = 30,
+        RunInBackground = false // Needs visible console for prompts and output
+    };
+
+    public PublishTool(IStatelessRunner cmdRunner)
+    {
+        _cmdRunner = cmdRunner;
+    }
+
+    public async Task<Maybe> ExecuteAsync(string targetDirectory)
+    {
+        Console.WriteLine("\n--- Initializing JCMU Publish Pipeline ---");
+
+        var contextMaybe = await Maybe.Try<PublishContext>(() => new PublishContext { TargetDirectory = targetDirectory.Trim('"') })
+            .BindAsync(LocateProjectFileAsync)
+            .BindAsync(ValidateJcmuSdkDependencyAsync)
+            .BindAsync(ExtractManifestAsync)
+            .BindAsync(ExtractVersionAsync)
+            .BindAsync(GetGitHubOwnerRepoAsync)
+            .BindAsync(VerifyAuthorIdentityAsync)
+            .BindAsync(EnsureGitHubTopicAsync)
+            .BindAsync(CheckExistingReleaseAsync)
+            .BindAsync(PromptForVersionOverrideAsync)
+            .BindAsync(SyncManifestVersionAsync)
+            .BindAsync(EnsureGitIntegrityAsync)
+            .BindAsync(ExecuteDotnetBuildAsync)
+            .BindAsync(CreateGitHubReleaseAsync)
+            .ConfigureAwait(false);
+
+        return contextMaybe.Bind(ctx => Maybe.SUCCESS); // Temporary terminator for Step 2
+    }
+
+    private Task<Maybe<PublishContext>> VerifyAuthorIdentityAsync(PublishContext ctx)
+    {
+        // Failsafe in case manifest validation was bypassed locally
+        if (string.IsNullOrWhiteSpace(ctx.Manifest!.Author))
+        {
+            return Task.FromResult(Maybe.None<PublishContext>("Manifest validation failed: 'Author' is missing. You must define an Author before publishing."));
+        }
+
+        // Anti-Spoofing: The manifest Author MUST match the GitHub Repository Owner
+        if (!ctx.Manifest.Author.Equals(ctx.Owner, StringComparison.OrdinalIgnoreCase))
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            var errorMsg = $"SECURITY BLOCKED: Author Mismatch.\n" +
+                           $"Your manifest.json claims the Author is '{ctx.Manifest.Author}', " +
+                           $"but the Git remote is owned by '{ctx.Owner}'.\n" +
+                           $"To prevent supply chain spoofing, these must match exactly. Update your manifest.json to proceed.";
+            Console.ResetColor();
+
+            return Task.FromResult(Maybe.None<PublishContext>(errorMsg));
+        }
+
+        Console.WriteLine($"[Valid] Identity Verified: {ctx.Manifest.Author}");
+        return Task.FromResult(Maybe.Some(ctx));
+    }
+
+    private async Task<Maybe<PublishContext>> GetGitHubOwnerRepoAsync(PublishContext ctx)
+    {
+        var projectDir = Path.GetDirectoryName(ctx.ProjectFilePath)!;
+
+        var request = CommandBuilder.Create("git")
+            .WithArgument("remote get-url origin")
+            .InDirectory(projectDir)
+            .Build();
+
+        return await _cmdRunner.RunBufferedAsync(request)
+            .EnsureSuccessAsync("Failed to read git remote. Ensure the project is a Git repository.")
+            .BindAsync(cmdResult =>
+            {
+                var remoteUrl = cmdResult.StandardOutput.Trim();
+
+                // Handle both HTTPS (https://github.com/owner/repo.git) and SSH (git@github.com:owner/repo.git)
+                var match = Regex.Match(remoteUrl, @"github\.com[:/](.+?)/(.+?)(\.git)?$", RegexOptions.IgnoreCase);
+
+                if (!match.Success)
+                    return Maybe.None<PublishContext>($"Could not parse GitHub Owner/Repo from remote URL: {remoteUrl}");
+
+                var owner = match.Groups[1].Value;
+                var repo = match.Groups[2].Value;
+
+                Console.WriteLine($"[Valid] Remote: {owner}/{repo}");
+
+                return Maybe.Some(ctx with { Owner = owner, Repo = repo });
+            }).ConfigureAwait(false);
+    }
+
+    private async Task<Maybe<PublishContext>> EnsureGitHubTopicAsync(PublishContext ctx)
+    {
+        Console.WriteLine("\n--- Checking GitHub Discoverability ---");
+        var projectDir = Path.GetDirectoryName(ctx.ProjectFilePath)!;
+
+        // 1. Check existing topics
+        var checkRequest = CommandBuilder.Create("gh")
+            .WithArgument($"api repos/{ctx.Owner}/{ctx.Repo}/topics")
+            .InDirectory(projectDir)
+            .Build();
+
+        return await _cmdRunner.RunBufferedAsync(checkRequest)
+            .EnsureSuccessAsync("GitHub API check failed. Ensure GitHub CLI (gh.exe) is installed and authenticated.")
+            .BindAsync(async cmdResult => {
+                var json = cmdResult.StandardOutput.Trim();
+
+                // Quick string check rather than full JSON deserialization for this simple payload
+                if (json.Contains("\"jcmu-addon\"", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("[OK] Repository is correctly tagged with 'jcmu-addon'.");
+                    Console.ResetColor();
+                    return Maybe.Some(ctx);
+                }
+
+                // 2. Inject missing topic
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("[INFO] Missing 'jcmu-addon' topic. Injecting to ensure store discoverability...");
+                Console.ResetColor();
+
+                var putRequest = CommandBuilder.Create("gh")
+                    .WithArgument($"api -X PUT repos/{ctx.Owner}/{ctx.Repo}/topics")
+                    .WithArgument("-f names[]=jcmu-addon")
+                    .InDirectory(projectDir)
+                    .Build();
+
+                return await _cmdRunner.RunBufferedAsync(putRequest)
+                    .EnsureSuccessAsync("Failed to update GitHub topics. Ensure you have admin rights to the repo.")
+                    .BindAsync(putResult =>
+                    {
+                        Console.ForegroundColor = ConsoleColor.Green;
+                        Console.WriteLine("[SUCCESS] Topic added.");
+                        Console.ResetColor();
+
+                        return Maybe.Some(ctx);
+                    })
+                    .ConfigureAwait(false);
+            })
+            .ConfigureAwait(false);
+    }
+
+    private async Task<Maybe<PublishContext>> CheckExistingReleaseAsync(PublishContext ctx)
+    {
+        var projectDir = Path.GetDirectoryName(ctx.ProjectFilePath)!;
+
+        var request = CommandBuilder.Create("gh")
+            .WithArgument($"release view v{ctx.InitialVersion}")
+            .InDirectory(projectDir)
+            .Build();
+
+        // We AWAIT the command result separately so its failure doesn't 
+        // propagate into the main tool's pipeline.
+        await _cmdRunner.RunBufferedAsync(request)
+            .TapAsync(cmd =>
+            {
+                // In THIS check, ExitCode 0 is the "Warning" state
+                if (cmd.ExitCode == 0)
+                {
+                    Console.ForegroundColor = ConsoleColor.DarkYellow;
+                    Console.WriteLine($"\n[WARNING] GitHub Release 'v{ctx.InitialVersion}' already exists!");
+                    Console.WriteLine("If you proceed with this version, the release creation step will fail.");
+                    Console.ResetColor();
+                }
+            })
+            // If gh.exe is missing or git fails, TapNone would be good for logging
+            .TapNoneAsync(err => Console.WriteLine($"[DEBUG] Release check skipped: {err.Message}"))
+            .ConfigureAwait(false);
+
+        // ALWAYS return the context. The train must go on!
+        return Maybe.Some(ctx);
+    }
+
+    private Task<Maybe<PublishContext>> LocateProjectFileAsync(PublishContext ctx)
+    {
+        if (!Directory.Exists(ctx.TargetDirectory))
+            return Task.FromResult(Maybe.None<PublishContext>($"Target directory does not exist: {ctx.TargetDirectory}"));
+
+        // Get all .csproj files within 2 directory levels
+        var allCsprojs = Directory.GetFiles(ctx.TargetDirectory, "*.csproj", SearchOption.AllDirectories)
+            .Where(f =>
+            {
+                var relativePath = Path.GetRelativePath(ctx.TargetDirectory, f);
+                var depth = relativePath.Split(Path.DirectorySeparatorChar).Length;
+                return depth <= 2;
+            })
+            .ToList();
+
+        if (allCsprojs.Count == 0)
+            return Task.FromResult(Maybe.None<PublishContext>("No .csproj file found in the target directory (or 1 level deep)."));
+
+        if (allCsprojs.Count > 1)
+            return Task.FromResult(Maybe.None<PublishContext>($"Multiple .csproj files found. The publish tool requires exactly one to resolve context.\nFound: {string.Join(", ", allCsprojs)}"));
+
+        return Task.FromResult(Maybe.Some(ctx with { ProjectFilePath = allCsprojs[0] }));
+    }
+
+    private async Task<Maybe<PublishContext>> ValidateJcmuSdkDependencyAsync(PublishContext ctx)
+    {
+        var csprojContent = await File.ReadAllTextAsync(ctx.ProjectFilePath).ConfigureAwait(false);
+
+        if (!csprojContent.Contains("<PackageReference Include=\"JinnDev.JCMU.SDK\"", StringComparison.OrdinalIgnoreCase))
+        {
+            return Maybe.None<PublishContext>("The target project does not appear to be a JCMU Addon (Missing JinnDev.JCMU.SDK PackageReference).");
+        }
+
+        return Maybe.Some(ctx);
+    }
+
+    private async Task<Maybe<PublishContext>> ExtractManifestAsync(PublishContext ctx)
+    {
+        var projectDir = Path.GetDirectoryName(ctx.ProjectFilePath)!;
+        var manifestPath = Path.Combine(projectDir, "manifest.json");
+
+        if (!File.Exists(manifestPath))
+        {
+            return Maybe.None<PublishContext>("No manifest.json found adjacent to the .csproj file.");
+        }
+
+        var json = await File.ReadAllTextAsync(manifestPath).ConfigureAwait(false);
+        var manifest = JsonSerializer.Deserialize<PluginManifest>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        if (manifest == null || string.IsNullOrWhiteSpace(manifest.AddonId))
+        {
+            return Maybe.None<PublishContext>("Failed to parse manifest.json or missing AddonId.");
+        }
+
+        return Maybe.Some(ctx with { ManifestFilePath = manifestPath, Manifest = manifest });
+    }
+
+    private async Task<Maybe<PublishContext>> ExtractVersionAsync(PublishContext ctx)
+    {
+        var csprojContent = await File.ReadAllTextAsync(ctx.ProjectFilePath).ConfigureAwait(false);
+
+        // Matches <Version>1.0.0</Version> or <PackageVersion>1.0.0</PackageVersion>
+        var match = Regex.Match(csprojContent, @"<(?:Package)?Version>(.+?)<\/(?:Package)?Version>", RegexOptions.IgnoreCase);
+
+        if (!match.Success || string.IsNullOrWhiteSpace(match.Groups[1].Value))
+        {
+            return Maybe.None<PublishContext>("Could not extract <Version> from the .csproj. Ensure the project explicitly defines a version.");
+        }
+
+        var csprojVersion = match.Groups[1].Value.Trim();
+        var manifestVersion = ctx.Manifest!.Version;
+
+        Console.WriteLine($"[Valid] Project: {Path.GetFileName(ctx.ProjectFilePath)}");
+        Console.WriteLine($"[Valid] AddonId: {ctx.Manifest.AddonId}");
+
+        if (csprojVersion.Equals(manifestVersion, StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"[Valid] Version: {csprojVersion} (Synchronized)");
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"[WARNING] Version Mismatch! CSPROJ: {csprojVersion} | MANIFEST: {manifestVersion}");
+            Console.ResetColor();
+        }
+
+        // We treat csproj as the primary source of truth for the initial prompt
+        return Maybe.Some(ctx with { InitialVersion = csprojVersion, FinalVersion = csprojVersion });
+    }
+
+    private async Task<Maybe<PublishContext>> SyncManifestVersionAsync(PublishContext ctx)
+    {
+        if (ctx.FinalVersion.Equals(ctx.Manifest!.Version, StringComparison.OrdinalIgnoreCase))
+        {
+            return Maybe.Some(ctx); // Already in sync, do nothing
+        }
+
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine($"\n[INFO] Updating manifest.json version to '{ctx.FinalVersion}'...");
+        Console.ResetColor();
+
+        // Create a new manifest record with the updated version
+        var updatedManifest = ctx.Manifest with { Version = ctx.FinalVersion };
+
+        // Serialize and write back to disk
+        var options = new JsonSerializerOptions { WriteIndented = true };
+        var newJson = JsonSerializer.Serialize(updatedManifest, options);
+        await File.WriteAllTextAsync(ctx.ManifestFilePath, newJson).ConfigureAwait(false);
+
+        return Maybe.Some(ctx with { Manifest = updatedManifest });
+    }
+
+    private Task<Maybe<PublishContext>> PromptForVersionOverrideAsync(PublishContext ctx)
+    {
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.Write($"Current version is {ctx.InitialVersion}. Enter new version or press Enter to keep: ");
+        Console.ResetColor();
+
+        var input = Console.ReadLine()?.Trim();
+
+        var finalVersion = string.IsNullOrWhiteSpace(input) ? ctx.InitialVersion : input;
+
+        return Task.FromResult(Maybe.Some(ctx with { FinalVersion = finalVersion }));
+    }
+
+    private async Task<Maybe<PublishContext>> EnsureGitIntegrityAsync(PublishContext ctx)
+    {
+        // If the user kept the original version, we assume they know what they are doing
+        // and skip the strict git enforcement loop.
+        if (ctx.InitialVersion.Equals(ctx.FinalVersion, StringComparison.OrdinalIgnoreCase))
+            return Maybe.Some(ctx);
+
+        var projectDir = Path.GetDirectoryName(ctx.ProjectFilePath)!;
+
+        // We initialize our state for the loop
+        Maybe<PublishContext> result = Maybe.Some(ctx);
+        bool shouldLoop = true;
+
+        while (shouldLoop)
+        {
+            var branchReq = CommandBuilder.Create("git").WithArgument("branch --show-current").InDirectory(projectDir).Build();
+            var statusReq = CommandBuilder.Create("git").WithArgument("status --porcelain").InDirectory(projectDir).Build();
+
+            // 1. Combine both git commands into a single (Branch, Status) tuple
+            // Using EnsureSuccessAsync to treat any git error as a pipeline failure
+            var gitCheckResult = await _cmdRunner.RunBufferedAsync(branchReq)
+                .EnsureSuccessAsync("Git branch check failed.")
+                .BindAsync(b => _cmdRunner.RunBufferedAsync(statusReq)
+                    .EnsureSuccessAsync("Git status check failed.")
+                    .MapAsync(s => (Branch: b.StandardOutput.Trim(), Status: s.StandardOutput.Trim()))).ConfigureAwait(false);
+
+            // 2. Use MatchAsync to process the result or the error
+            var iteration = await gitCheckResult.MatchAsync(
+                someAsync: async state =>
+                {
+                    bool isMainOrMaster = state.Branch.Equals("main", StringComparison.OrdinalIgnoreCase) ||
+                                          state.Branch.Equals("master", StringComparison.OrdinalIgnoreCase);
+                    bool isClean = string.IsNullOrWhiteSpace(state.Status);
+
+                    if (isMainOrMaster && isClean)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Green;
+                        Console.WriteLine("[OK] Repository is clean and on the main branch.");
+                        Console.ResetColor();
+
+                        shouldLoop = false; // We are done!
+                        return Maybe.SUCCESS;
+                    }
+
+                    // UI Logic
+                    Console.WriteLine();
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    if (!isMainOrMaster) Console.WriteLine($"[WARNING] Not on main/master branch (Current: '{state.Branch}').");
+                    if (!isClean) Console.WriteLine("[WARNING] Repository has uncommitted changes.");
+
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    Console.Write("Fix and [Enter] to re-check, or [C] to proceed anyway: ");
+                    Console.ResetColor();
+
+                    var input = Console.ReadLine()?.Trim();
+
+                    if (input?.Equals("C", StringComparison.OrdinalIgnoreCase) == true)
+                    {
+                        Console.ForegroundColor = ConsoleColor.DarkYellow;
+                        Console.WriteLine("Overriding strict git requirements. Proceeding...");
+                        Console.ResetColor();
+                        shouldLoop = false; // User forced continuation
+                    }
+
+                    return Maybe.SUCCESS;
+                },
+                noneAsync: async err =>
+                {
+                    // If a command failed, we update the result and stop the loop
+                    result = Maybe.None<PublishContext>(err.Message);
+                    shouldLoop = false;
+                    return Maybe.SUCCESS;
+                }
+            ).ConfigureAwait(false);
+
+            // If the Match itself failed (e.g. unexpected exception), propagate the error
+            if (!iteration.HasValue) return Maybe.None<PublishContext>(iteration.Message);
+        }
+
+        return result;
+    }
+
+    private async Task<Maybe<PublishContext>> ExecuteDotnetBuildAsync(PublishContext ctx)
+    {
+        Console.WriteLine($"\n--- Building Project (v{ctx.FinalVersion}) ---");
+        var projectDir = Path.GetDirectoryName(ctx.ProjectFilePath)!;
+
+        var buildRequest = CommandBuilder.Create("dotnet")
+            .WithArgument("build")
+            .WithArgument("-c Release")
+            // Inject the version in-memory to avoid mutating the source file
+            .WithArgument($"-p:Version={ctx.FinalVersion}")
+            .InDirectory(projectDir)
+            .Build();
+
+        return await _cmdRunner.RunBufferedAsync(buildRequest)
+            .EnsureSuccessAsync(cmd => $"Build failed:\n{cmd.StandardOutput}")
+            .BindAsync(_ =>
+            {
+                // EnsureSuccess automatically appends cmd.StandardError to whatever string you return above!
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("[SUCCESS] Build completed cleanly.");
+                Console.ResetColor();
+
+                return Maybe.Some(ctx);
+            }).ConfigureAwait(false);
+    }
+
+    private async Task<Maybe<PublishContext>> CreateGitHubReleaseAsync(PublishContext ctx)
+    {
+        Console.WriteLine($"\n--- Creating GitHub Release (v{ctx.FinalVersion}) ---");
+        var projectDir = Path.GetDirectoryName(ctx.ProjectFilePath)!;
+
+        var releaseRequest = CommandBuilder.Create("gh")
+            .WithArgument("release create")
+            .WithArgument($"v{ctx.FinalVersion}")
+            .WithArgument("--title")
+            .WithQuotedArgument($"v{ctx.FinalVersion}")
+            .WithArgument("--generate-notes")
+            .InDirectory(projectDir)
+            .Build();
+
+        return await _cmdRunner.RunBufferedAsync(releaseRequest)
+            .EnsureSuccessAsync(cmd =>
+            {
+                // Inspect the CLI error to provide a better prefix
+                if (cmd.StandardError.Contains("already exists", StringComparison.OrdinalIgnoreCase))
+                {
+                    return $"Release creation failed: The tag 'v{ctx.FinalVersion}' already exists on GitHub.";
+                }
+
+                return "Failed to create GitHub release. Check your connection or 'gh' authentication.";
+            })
+            .BindAsync(_ =>
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"[SUCCESS] GitHub Release v{ctx.FinalVersion} created successfully!");
+                Console.ResetColor();
+                return Maybe.Some(ctx);
+            }).ConfigureAwait(false);
+    }
+}
+
+ *****************
+JCMU.CoreTools/Search/SearchTool.cs
+ *****************
+
+
+using JinnDev.JCMU.AddonManager.Models;
+using JinnDev.Utilities.Monad;
+using System.Diagnostics;
+
+namespace JinnDev.JCMU.CoreTools.Tools;
+
+public class SearchTool : ICoreTool
+{
+    public string ToolId => "Core.Search";
+
+    public MenuDefinition Menu => new MenuDefinition
+    {
+        MenuItemName = "Search for Addons...",
+        IconPath = "imageres.dll,-177", // Magnifying Glass
+        Ordinal = 10,
+        RunInBackground = false
+    };
+
+    public Task<Maybe> ExecuteAsync(string targetDirectory)
+    {
+        return Maybe.TryAsync(async () =>
+        {
+            var coreExePath = Process.GetCurrentProcess().MainModule?.FileName;
+            if (coreExePath == null) throw new Exception("Could not locate executing process.");
+
+            // Spawn the interactive REPL in the same console window
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = coreExePath,
+                Arguments = "-i search",
+                UseShellExecute = false
+            };
+
+            using var process = Process.Start(startInfo);
+            if (process != null)
+            {
+                await process.WaitForExitAsync().ConfigureAwait(false);
+            }
+
+            return Maybe.SUCCESS;
+        });
+    }
+}
+
+ *****************
+JCMU.HiddenBed/JCMU.HiddenBed.csproj
+ *****************
+
+
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<AssemblyName>jcmu-bg</AssemblyName>
+		<SupportedOSPlatform>windows</SupportedOSPlatform>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net8.0</TargetFramework>
+		<LangVersion>12</LangVersion>
+		<RootNamespace>JinnDev.$(MSBuildProjectName.Replace(" ", "_"))</RootNamespace>
+		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Authors>JinnDev</Authors>
+		<Company>Jinn Studios</Company>
+		<Product>Jinn Context Menu Utility Addon Manager</Product>
+		<Nullable>enable</Nullable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\JCMU.ConsoleBed\JCMU.ConsoleBed.csproj" />
+	</ItemGroup>
+
+</Project>
+
+
+ *****************
+JCMU.HiddenBed/Program.cs
+ *****************
+
+
+using System.Runtime.Versioning;
+
+namespace JinnDev.JCMU.HiddenBed;
+
+[SupportedOSPlatform("windows")]
+public class Program
+{
+    // It takes the arguments from Windows and instantly forwards them to your Main app!
+    public static async Task<int> Main(string[] args)
+    {
+        return await ConsoleBed.Program.Main(args).ConfigureAwait(false);
+    }
+}

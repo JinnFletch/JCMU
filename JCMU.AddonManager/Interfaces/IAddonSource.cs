@@ -31,4 +31,11 @@ public interface IAddonSource
     /// <param name="targetTempPath">The local directory to clone the code into.</param>
     /// <returns>A monad containing the absolute path to the downloaded source directory.</returns>
     Task<Maybe> DownloadSourceAsync(string repositoryUrl, string version, string targetTempPath);
+
+    /// <summary>
+    /// Fetches the raw manifest.json from the remote repository's default branch for pre-flight security checks.
+    /// </summary>
+    /// <param name="repositoryUrl">The Git URL of the addon.</param>
+    /// <returns>A monad containing the parsed PluginManifest.</returns>
+    Task<Maybe<PluginManifest>> GetRemoteManifestAsync(string repositoryUrl);
 }

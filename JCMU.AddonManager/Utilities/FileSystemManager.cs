@@ -18,7 +18,7 @@ internal static class FileSystemManager
     /// <summary>
     /// Generates the immutable installation context containing all required absolute paths.
     /// </summary>
-    public static InstallContext CreateInstallContext(string addonId, string version, string repositoryUrl)
+    public static InstallContext CreateInstallContext(string addonId, string version, string repositoryUrl, string author)
     {
         var tempBase = Path.Combine(BaseDirectory, "Temp", $"{addonId}_{Guid.NewGuid().ToString()[..8]}");
 
@@ -29,7 +29,7 @@ internal static class FileSystemManager
             RepositoryUrl = repositoryUrl,
             TempCloneDirectory = Path.Combine(tempBase, "Source"),
             TempPublishDirectory = Path.Combine(tempBase, "Publish"),
-            FinalPluginDirectory = Path.Combine(BaseDirectory, "Plugins", addonId)
+            FinalPluginDirectory = Path.Combine(BaseDirectory, "Plugins", author, addonId)
         };
     }
 

@@ -42,10 +42,26 @@ public class DevUnlinkTool : ICoreTool
 
             Console.WriteLine($"\n--- Unlinking Dev Addon: {addonId} ---");
 
-            var targetPath = Path.Combine(PluginsBase, addonId);
+            // Search the 2-tier structure
+            var targetDirectories = Directory.Exists(PluginsBase)
+                ? Directory.GetDirectories(PluginsBase)
+                    .SelectMany(authorDir => Directory.GetDirectories(authorDir))
+                    .Where(addonDir => Path.GetFileName(addonDir).Equals(addonId, StringComparison.OrdinalIgnoreCase))
+                    .ToList()
+                : new List<string>();
 
-            if (!Directory.Exists(targetPath))
+            // Legacy fallback
+            var legacyPath = Path.Combine(PluginsBase, addonId);
+            if (Directory.Exists(legacyPath) && !targetDirectories.Contains(legacyPath))
+                targetDirectories.Add(legacyPath);
+
+            if (targetDirectories.Count == 0)
                 return Maybe.Fail($"No dev-linked addon found with ID '{addonId}'.");
+
+            if (targetDirectories.Count > 1)
+                return Maybe.Fail($"Ambiguous dev-link: Multiple addons found with ID '{addonId}'. Please manually clean your Plugins directory.");
+
+            var targetPath = targetDirectories[0];
 
             // 1. Unregister from Windows Explorer Registry
             var registryResult = _registryManager.UnregisterAddon(addonId);
@@ -55,6 +71,16 @@ public class DevUnlinkTool : ICoreTool
             // 2. Remove the Directory Junction
             // Safety: recursive=false ensures we only delete the link, NOT the developer's source code!
             Directory.Delete(targetPath, recursive: false);
+
+            // 3. Clean up the {Author} folder if it is now empty
+            var parent = Path.GetDirectoryName(targetPath);
+            if (parent != null &&
+                !parent.EndsWith("Plugins", StringComparison.OrdinalIgnoreCase) &&
+                Directory.Exists(parent) &&
+                !Directory.EnumerateFileSystemEntries(parent).Any())
+            {
+                Directory.Delete(parent);
+            }
 
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine($"\n[SUCCESS] Dev-Link for '{addonId}' has been removed.");

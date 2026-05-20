@@ -44,7 +44,7 @@ public class GitHubAddonSource : IAddonSource
 
             var mappedResults = result.Items.Select(repo => new AddonSearchResult
             {
-                AddonId = repo.FullName,
+                AddonId = repo.Name,
                 RepositoryUrl = repo.HtmlUrl,
                 Description = repo.Description,
                 Author = repo.Owner?.Login,
@@ -111,6 +111,45 @@ public class GitHubAddonSource : IAddonSource
         }).ConfigureAwait(false);
     }
 
+    public async Task<Maybe<PluginManifest>> GetRemoteManifestAsync(string repositoryUrl)
+    {
+        return await Maybe.TryAsync<PluginManifest>(async () =>
+        {
+            if (!Uri.TryCreate(repositoryUrl, UriKind.Absolute, out var uri) || uri.Segments.Length < 3)
+                throw new ArgumentException($"Invalid GitHub repository URL: {repositoryUrl}");
+
+            var owner = uri.Segments[1].Trim('/');
+            var repo = uri.Segments[2].Trim('/');
+            var requestUrl = $"{GitHubApiBase}/repos/{owner}/{repo}/contents/manifest.json";
+
+            using var response = await _httpClient.GetAsync(requestUrl).ConfigureAwait(false);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                throw new Exception("manifest.json not found in the repository root. This is not a valid JCMU Addon.");
+
+            response.EnsureSuccessStatusCode();
+
+            var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var contentDto = JsonSerializer.Deserialize<GitHubContentResponse>(json)
+                             ?? throw new Exception("Failed to deserialize GitHub contents response.");
+
+            // GitHub returns base64 encoded content, split by newlines. Clean it before decoding.
+            var base64 = contentDto.Content.Replace("\n", "").Replace("\r", "");
+            var decodedBytes = Convert.FromBase64String(base64);
+            var manifestJson = System.Text.Encoding.UTF8.GetString(decodedBytes);
+
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var manifest = JsonSerializer.Deserialize<PluginManifest>(manifestJson, options)
+                           ?? throw new Exception("Failed to parse the remote manifest.json.");
+
+            var validation = manifest.Validate();
+            if (!validation.HasValue)
+                throw new Exception($"Remote manifest validation failed: {validation.Message}");
+
+            return manifest;
+        }).ConfigureAwait(false);
+    }
+
     #region Private DTOs for GitHub JSON Mapping
 
     private record GitHubSearchResponse(
@@ -118,6 +157,7 @@ public class GitHubAddonSource : IAddonSource
         [property: JsonPropertyName("items")] List<GitHubRepoDto> Items);
 
     private record GitHubRepoDto(
+        [property: JsonPropertyName("name")] string Name,
         [property: JsonPropertyName("full_name")] string FullName,
         [property: JsonPropertyName("html_url")] string HtmlUrl,
         [property: JsonPropertyName("description")] string? Description,
@@ -131,6 +171,8 @@ public class GitHubAddonSource : IAddonSource
         [property: JsonPropertyName("commit")] GitHubCommitDto? Commit);
 
     private record GitHubCommitDto([property: JsonPropertyName("sha")] string Sha);
+
+    private record GitHubContentResponse([property: JsonPropertyName("content")] string Content);
 
     #endregion
 }

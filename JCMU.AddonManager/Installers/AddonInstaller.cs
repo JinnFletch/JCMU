@@ -31,6 +31,42 @@ public class AddonInstaller : IAddonInstaller
         return await DetermineInstallContextAsync(source, addonId, version)
             .BindAsync(FileSystemManager.PrepareTempDirectoriesAsync)
 
+            // === THE MISSING SECURITY CHECK ===
+            .BindAsync(ctx =>
+            {
+                var pluginsBase = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "JCMU", "Plugins");
+                if (Directory.Exists(pluginsBase))
+                {
+                    // Find any existing installation of this AddonId
+                    var existingDirs = Directory.GetDirectories(pluginsBase)
+                        .SelectMany(authorDir => Directory.GetDirectories(authorDir))
+                        .Where(addonDir => Path.GetFileName(addonDir).Equals(addonId, StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+
+                    // Check legacy 1-tier installations too
+                    var legacyPath = Path.Combine(pluginsBase, addonId);
+                    if (Directory.Exists(legacyPath) && !existingDirs.Contains(legacyPath))
+                        existingDirs.Add(legacyPath);
+
+                    if (existingDirs.Any())
+                    {
+                        var existingDir = existingDirs.First();
+                        var existingAuthor = Path.GetFileName(Path.GetDirectoryName(existingDir)); // Gets the Author folder name
+
+                        // If it's a legacy 1-tier, or the authors don't match, block the install!
+                        if (existingAuthor!.Equals("Plugins", StringComparison.OrdinalIgnoreCase) ||
+                           !existingAuthor.Equals(Path.GetFileName(Path.GetDirectoryName(ctx.FinalPluginDirectory)), StringComparison.OrdinalIgnoreCase))
+                        {
+                            return Maybe.None<InstallContext>(
+                                $"NAMESPACE COLLISION: '{addonId}' is already installed on this machine by another publisher. " +
+                                $"To prevent hijacking, you cannot install a competing addon with the same ID.");
+                        }
+                    }
+                }
+                return Maybe.Some(ctx);
+            })
+            // ==================================
+
             // Phase 2: Acquisition & Compilation (Git & DotNet)
             .BindAsync(ctx => source.DownloadSourceAsync(ctx.RepositoryUrl, ctx.SelectedVersion, ctx.TempCloneDirectory).WithValueAsync(ctx))
             .BindAsync(ctx => _builder.BuildPluginAsync(ctx.TempCloneDirectory, ctx.TempPublishDirectory).WithValueAsync(ctx))
@@ -59,31 +95,48 @@ public class AddonInstaller : IAddonInstaller
         {
             _logger.LogInformation("Attempting to uninstall '{AddonId}'...", addonId);
 
-            var targetDirectory = Path.Combine(
+            var pluginsBase = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "JCMU", "Plugins", addonId);
+                "JCMU", "Plugins");
 
-            if (Directory.Exists(targetDirectory))
+            // Search the 2-tier structure for the specific AddonId
+            var targetDirectories = Directory.Exists(pluginsBase)
+                ? Directory.GetDirectories(pluginsBase)
+                    .SelectMany(authorDir => Directory.GetDirectories(authorDir))
+                    .Where(addonDir => Path.GetFileName(addonDir).Equals(addonId, StringComparison.OrdinalIgnoreCase))
+                    .ToList()
+                : new List<string>();
+
+            // Legacy fallback (just in case they are uninstalling an older 1-tier addon)
+            var legacyPath = Path.Combine(pluginsBase, addonId);
+            if (Directory.Exists(legacyPath) && !targetDirectories.Contains(legacyPath))
+                targetDirectories.Add(legacyPath);
+
+            if (targetDirectories.Count == 0)
             {
-                Directory.Delete(targetDirectory, true);
-                _logger.LogInformation("Successfully deleted addon files.");
-
-                var parent = Path.GetDirectoryName(targetDirectory);
-                while (parent != null &&
-                       !parent.EndsWith("Plugins", StringComparison.OrdinalIgnoreCase) &&
-                       Directory.Exists(parent) &&
-                       !Directory.EnumerateFileSystemEntries(parent).Any())
-                {
-                    Directory.Delete(parent);
-                    parent = Path.GetDirectoryName(parent);
-                }
+                _logger.LogWarning("Addon directory not found: {AddonId}", addonId);
             }
             else
             {
-                _logger.LogWarning("Addon directory not found: {Path}", targetDirectory);
+                foreach (var targetDirectory in targetDirectories)
+                {
+                    Directory.Delete(targetDirectory, true);
+                    _logger.LogInformation("Successfully deleted addon files at {Path}.", targetDirectory);
+
+                    // Deletes the {Author} folder if it's now empty
+                    var parent = Path.GetDirectoryName(targetDirectory);
+                    while (parent != null &&
+                           !parent.EndsWith("Plugins", StringComparison.OrdinalIgnoreCase) &&
+                           Directory.Exists(parent) &&
+                           !Directory.EnumerateFileSystemEntries(parent).Any())
+                    {
+                        Directory.Delete(parent);
+                        parent = Path.GetDirectoryName(parent);
+                    }
+                }
             }
 
-            // Delete the configuration and secrets ---
+            // Delete the configuration and secrets
             var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             var configFilePath = Path.Combine(localAppData, "JCMU", "Configs", $"{addonId}.json");
 
@@ -114,6 +167,33 @@ public class AddonInstaller : IAddonInstaller
 
                 return Maybe.Some(match);
             })
+            .BindAsync(match => source.GetRemoteManifestAsync(match.RepositoryUrl)
+                .BindAsync(manifest =>
+                {
+                    if (!Uri.TryCreate(match.RepositoryUrl, UriKind.Absolute, out var uri) || uri.Segments.Length < 3)
+                        return Maybe.None<AddonSearchResult>($"Invalid repository URL: {match.RepositoryUrl}");
+
+                    var owner = uri.Segments[1].Trim('/');
+
+                    // 1. Anti-Spoofing: Author MUST match GitHub Owner
+                    if (!string.Equals(manifest.Author, owner, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return Maybe.None<AddonSearchResult>(
+                            $"SPOOFING DETECTED: The manifest claims to be authored by '{manifest.Author}', " +
+                            $"but the repository is owned by '{owner}'. Installation aborted to protect your system.");
+                    }
+
+                    // 2. Identity Verification: AddonId must match
+                    // Using EndsWith to safely bridge the gap before Step 4 is implemented (since search currently returns Owner/Repo)
+                    if (!addonId.EndsWith(manifest.AddonId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return Maybe.None<AddonSearchResult>(
+                            $"IDENTITY MISMATCH: You requested '{addonId}', but the repository manifest identifies as '{manifest.AddonId}'.");
+                    }
+
+                    return Maybe.Some(match);
+                })
+            )
             .BindAsync(match => source.GetVersionsAsync(match.RepositoryUrl)
                 .BindAsync(versions =>
                 {
@@ -125,7 +205,7 @@ public class AddonInstaller : IAddonInstaller
 
                     if (selected == null) return Maybe.None<InstallContext>($"Version '{targetVersion}' not found.");
 
-                    return Maybe.Some(FileSystemManager.CreateInstallContext(match.AddonId, selected.VersionName, match.RepositoryUrl));
+                    return Maybe.Some(FileSystemManager.CreateInstallContext(match.AddonId, selected.VersionName, match.RepositoryUrl, match.Author!));
                 })
             ).ConfigureAwait(false);
     }

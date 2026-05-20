@@ -69,16 +69,17 @@ public class DevLinkTool : ICoreTool
         })
         .BindAsync(ctx =>
         {
-            var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.AddonId);
+            // Establish the two-tier structure for Dev-Links
+            var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.Author, ctx.Manifest.AddonId);
             if (Directory.Exists(finalPluginDirectory))
-                Directory.Delete(finalPluginDirectory, true);
+                Directory.Delete(finalPluginDirectory, true); // True is safe here; it only deletes the junction, not the target
 
-            Directory.CreateDirectory(PluginsBase);
+            Directory.CreateDirectory(Path.Combine(PluginsBase, ctx.Manifest.Author));
             return Maybe<(PluginManifest Manifest, string OutputDir)>.Some(ctx);
         })
         .BindAsync(ctx =>
         {
-            var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.AddonId);
+            var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.Author, ctx.Manifest.AddonId);
             var request = CommandBuilder.Create("mklink")
                 .WithArgument("/J")
                 .WithQuotedArgument(finalPluginDirectory)
@@ -102,7 +103,7 @@ public class DevLinkTool : ICoreTool
         })
         .TapAsync(ctx =>
         {
-            var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.AddonId);
+            var finalPluginDirectory = Path.Combine(PluginsBase, ctx.Manifest.Author, ctx.Manifest.AddonId);
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine($"\n[SUCCESS] '{ctx.Manifest.AddonId}' is now Dev-Linked!");
             Console.WriteLine($"Junction: {finalPluginDirectory} -> {ctx.OutputDir}");

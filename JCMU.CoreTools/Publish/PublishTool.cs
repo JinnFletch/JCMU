@@ -35,6 +35,7 @@ public class PublishTool : ICoreTool
             .BindAsync(ExtractManifestAsync)
             .BindAsync(ExtractVersionAsync)
             .BindAsync(GetGitHubOwnerRepoAsync)
+            .BindAsync(VerifyAuthorIdentityAsync)
             .BindAsync(EnsureGitHubTopicAsync)
             .BindAsync(CheckExistingReleaseAsync)
             .BindAsync(PromptForVersionOverrideAsync)
@@ -45,6 +46,31 @@ public class PublishTool : ICoreTool
             .ConfigureAwait(false);
 
         return contextMaybe.Bind(ctx => Maybe.SUCCESS); // Temporary terminator for Step 2
+    }
+
+    private Task<Maybe<PublishContext>> VerifyAuthorIdentityAsync(PublishContext ctx)
+    {
+        // Failsafe in case manifest validation was bypassed locally
+        if (string.IsNullOrWhiteSpace(ctx.Manifest!.Author))
+        {
+            return Task.FromResult(Maybe.None<PublishContext>("Manifest validation failed: 'Author' is missing. You must define an Author before publishing."));
+        }
+
+        // Anti-Spoofing: The manifest Author MUST match the GitHub Repository Owner
+        if (!ctx.Manifest.Author.Equals(ctx.Owner, StringComparison.OrdinalIgnoreCase))
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            var errorMsg = $"SECURITY BLOCKED: Author Mismatch.\n" +
+                           $"Your manifest.json claims the Author is '{ctx.Manifest.Author}', " +
+                           $"but the Git remote is owned by '{ctx.Owner}'.\n" +
+                           $"To prevent supply chain spoofing, these must match exactly. Update your manifest.json to proceed.";
+            Console.ResetColor();
+
+            return Task.FromResult(Maybe.None<PublishContext>(errorMsg));
+        }
+
+        Console.WriteLine($"[Valid] Identity Verified: {ctx.Manifest.Author}");
+        return Task.FromResult(Maybe.Some(ctx));
     }
 
     private async Task<Maybe<PublishContext>> GetGitHubOwnerRepoAsync(PublishContext ctx)
