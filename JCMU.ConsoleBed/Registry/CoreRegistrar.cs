@@ -1,8 +1,10 @@
 ﻿using JinnDev.JCMU.AddonManager.Interfaces;
+using JinnDev.JCMU.AddonManager.Models;
 using JinnDev.JCMU.CoreTools;
 using JinnDev.Utilities.Monad;
 using Microsoft.Extensions.Logging;
 using System.Runtime.Versioning;
+using System.Text.Json;
 using WinReg = Microsoft.Win32.Registry;
 
 namespace JinnDev.JCMU.ConsoleBed.Registry;
@@ -53,7 +55,7 @@ public class CoreRegistrar
 
             using var rootStore = WinReg.CurrentUser.CreateSubKey(@"Software\Classes\JCMU_Menu\shell");
 
-            // Automatically write all injected Core Tools!
+            // 1. Re-register Built-in Core Tools
             foreach (var tool in _coreTools)
             {
                 var modifiedMenu = tool.Menu with { Category = "JCMU Tools" };
@@ -61,6 +63,39 @@ public class CoreRegistrar
 
                 if (!result.HasValue)
                     _logger.LogWarning("Failed to register built-in tool {ToolId}: {Message}", tool.ToolId, result.Message);
+            }
+
+            // 2. RECOVERY: Re-register existing third-party addons
+            var pluginsBase = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "JCMU", "Plugins");
+
+            if (Directory.Exists(pluginsBase))
+            {
+                _logger.LogInformation("Scanning for existing addons to re-register...");
+
+                // Find all manifest files in the 2-tier structure
+                var manifests = Directory.GetFiles(pluginsBase, "manifest.json", SearchOption.AllDirectories);
+
+                foreach (var manifestPath in manifests)
+                {
+                    try
+                    {
+                        var json = File.ReadAllText(manifestPath);
+                        var manifest = JsonSerializer.Deserialize<PluginManifest>(json,
+                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+                        if (manifest != null)
+                        {
+                            _logger.LogInformation("Restoring menu for: {AddonId}", manifest.AddonId);
+                            _registryManager.RegisterAddon(manifest.AddonId, manifest.Menu, coreExePath);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning("Failed to restore addon at {Path}: {Message}", manifestPath, ex.Message);
+                    }
+                }
             }
 
             _logger.LogInformation("Core registry initialization successful.");
