@@ -120,23 +120,36 @@ public class GitHubAddonSource : IAddonSource
 
             var owner = uri.Segments[1].Trim('/');
             var repo = uri.Segments[2].Trim('/');
-            var requestUrl = $"{GitHubApiBase}/repos/{owner}/{repo}/contents/manifest.json";
 
-            using var response = await _httpClient.GetAsync(requestUrl).ConfigureAwait(false);
+            // Convention 1: Root of the repo (manifest.json)
+            // Convention 2: Subfolder named after the repo (RepoName/manifest.json)
+            var possiblePaths = new[] { "manifest.json", $"{repo}/manifest.json" };
 
-            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
-                throw new Exception("manifest.json not found in the repository root. This is not a valid JCMU Addon.");
+            string? manifestJson = null;
 
-            response.EnsureSuccessStatusCode();
+            foreach (var path in possiblePaths)
+            {
+                var requestUrl = $"{GitHubApiBase}/repos/{owner}/{repo}/contents/{path}";
+                using var response = await _httpClient.GetAsync(requestUrl).ConfigureAwait(false);
 
-            var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-            var contentDto = JsonSerializer.Deserialize<GitHubContentResponse>(json)
-                             ?? throw new Exception("Failed to deserialize GitHub contents response.");
+                if (response.IsSuccessStatusCode)
+                {
+                    var jsonResponse = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    var contentDto = JsonSerializer.Deserialize<GitHubContentResponse>(jsonResponse);
+                    if (contentDto != null)
+                    {
+                        var base64 = contentDto.Content.Replace("\n", "").Replace("\r", "");
+                        manifestJson = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(base64));
+                        break; // Found it!
+                    }
+                }
+            }
 
-            // GitHub returns base64 encoded content, split by newlines. Clean it before decoding.
-            var base64 = contentDto.Content.Replace("\n", "").Replace("\r", "");
-            var decodedBytes = Convert.FromBase64String(base64);
-            var manifestJson = System.Text.Encoding.UTF8.GetString(decodedBytes);
+            if (string.IsNullOrEmpty(manifestJson))
+            {
+                throw new Exception("manifest.json not found in the repository root or expected subfolders. " +
+                                    "Ensure your manifest is in the root or a folder matching the repository name.");
+            }
 
             var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
             var manifest = JsonSerializer.Deserialize<PluginManifest>(manifestJson, options)
