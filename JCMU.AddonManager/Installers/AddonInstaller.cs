@@ -31,41 +31,54 @@ public class AddonInstaller : IAddonInstaller
         return await DetermineInstallContextAsync(source, addonId, version)
             .BindAsync(FileSystemManager.PrepareTempDirectoriesAsync)
 
-            // === THE MISSING SECURITY CHECK ===
+            // === NAMESPACE & ANTI-HIJACKING CHECK ===
             .BindAsync(ctx =>
             {
                 var pluginsBase = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "JCMU", "Plugins");
                 if (Directory.Exists(pluginsBase))
                 {
-                    // Find any existing installation of this AddonId
+                    // 1. Find any existing installation of this AddonId (checks 1-tier and 2-tier)
                     var existingDirs = Directory.GetDirectories(pluginsBase)
                         .SelectMany(authorDir => Directory.GetDirectories(authorDir))
-                        .Where(addonDir => Path.GetFileName(addonDir).Equals(addonId, StringComparison.OrdinalIgnoreCase))
+                        .Concat(Directory.GetDirectories(pluginsBase))
+                        .Where(addonDir => Path.GetFileName(addonDir).Equals(ctx.TargetAddonId, StringComparison.OrdinalIgnoreCase))
+                        .Distinct()
                         .ToList();
-
-                    // Check legacy 1-tier installations too
-                    var legacyPath = Path.Combine(pluginsBase, addonId);
-                    if (Directory.Exists(legacyPath) && !existingDirs.Contains(legacyPath))
-                        existingDirs.Add(legacyPath);
 
                     if (existingDirs.Any())
                     {
-                        var existingDir = existingDirs.First();
-                        var existingAuthor = Path.GetFileName(Path.GetDirectoryName(existingDir)); // Gets the Author folder name
+                        var existingPath = existingDirs.First();
 
-                        // If it's a legacy 1-tier, or the authors don't match, block the install!
-                        if (existingAuthor!.Equals("Plugins", StringComparison.OrdinalIgnoreCase) ||
-                           !existingAuthor.Equals(Path.GetFileName(Path.GetDirectoryName(ctx.FinalPluginDirectory)), StringComparison.OrdinalIgnoreCase))
+                        // Extract Author from folder structure: Plugins\{Author}\{AddonId}
+                        var existingAuthor = Path.GetFileName(Path.GetDirectoryName(existingPath));
+                        var targetAuthor = Path.GetFileName(Path.GetDirectoryName(ctx.FinalPluginDirectory));
+
+                        bool isLegacy = existingAuthor!.Equals("Plugins", StringComparison.OrdinalIgnoreCase);
+                        bool isSameAuthor = !isLegacy && string.Equals(existingAuthor, targetAuthor, StringComparison.OrdinalIgnoreCase);
+
+                        // If it's a legacy install, we can't verify the author safely.
+                        if (isLegacy)
                         {
                             return Maybe.None<InstallContext>(
-                                $"NAMESPACE COLLISION: '{addonId}' is already installed on this machine by another publisher. " +
-                                $"To prevent hijacking, you cannot install a competing addon with the same ID.");
+                                $"LEGACY COLLISION: '{ctx.TargetAddonId}' is installed using an older JCMU structure. " +
+                                $"Please run 'jcmu uninstall {ctx.TargetAddonId}' first to upgrade to the new secure format.");
                         }
+
+                        // If the authors DON'T match, this is a Hijacking attempt. BLOCK.
+                        if (!isSameAuthor)
+                        {
+                            return Maybe.None<InstallContext>(
+                                $"NAMESPACE COLLISION: '{ctx.TargetAddonId}' is already installed by author '{existingAuthor}'. " +
+                                $"To protect your system, you cannot install a version by '{targetAuthor}' over it.");
+                        }
+
+                        // If it IS the same author, we do nothing and let the pipeline continue.
+                        // The MoveToFinalDestinationAsync step will safely overwrite the files.
                     }
                 }
                 return Maybe.Some(ctx);
             })
-            // ==================================
+            // ========================================
 
             // Phase 2: Acquisition & Compilation (Git & DotNet)
             .BindAsync(ctx => source.DownloadSourceAsync(ctx.RepositoryUrl, ctx.SelectedVersion, ctx.TempCloneDirectory).WithValueAsync(ctx))
