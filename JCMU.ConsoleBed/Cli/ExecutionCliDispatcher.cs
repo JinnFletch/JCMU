@@ -38,7 +38,16 @@ public class ExecutionCliDispatcher
         _logger.LogInformation("--- Execution Triggered via Shell ---");
 
         // The Invoker now returns Maybe<int>
-        var result = await _invoker.ExecuteAsync(addonId, targetDirectory).ConfigureAwait(false);
+        using var cts = new CancellationTokenSource();
+
+        Console.CancelKeyPress += (sender, e) =>
+        {
+            e.Cancel = true; // Prevent abrupt OS process termination
+            cts.Cancel();    // Signal the Addon's token to cancel
+            _logger.LogWarning("Cancellation requested by user (CTRL+C). Attempting graceful shutdown...");
+        };
+
+        var result = await _invoker.ExecuteAsync(addonId, targetDirectory, cts.Token).ConfigureAwait(false);
 
         // Only perform interactive UI pauses if we are actually in a visible console
         if (!Console.IsOutputRedirected && Console.WindowHeight > 0)

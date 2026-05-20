@@ -14,12 +14,14 @@ public partial class HostServices : IHostServices
 {
     public IPluginLogger Logger { get; }
     public IAddonSettings Settings { get; }
+    public IHostUI UI { get; }
 
     public HostServices(string addonId, ILoggerFactory loggerFactory)
     {
         var coreLogger = loggerFactory.CreateLogger("JCMU.PluginRuntime");
         Logger = new HostLogger(addonId, coreLogger);
         Settings = new AddonSettings(addonId);
+        UI = new HostUI();
     }
 
     public Task<Maybe<string>> PromptUserAsync(string message)

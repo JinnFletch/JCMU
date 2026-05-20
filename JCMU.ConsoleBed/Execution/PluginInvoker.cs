@@ -30,7 +30,7 @@ public class PluginInvoker : IPluginInvoker
     /// <param name="addonId">The unique identifier of the installed addon.</param>
     /// <param name="targetDirectory">The absolute path the user right-clicked on.</param>
     /// <returns>A monad representing the success or failure of the execution.</returns>
-    public async Task<Maybe<int>> ExecuteAsync(string addonId, string targetDirectory)
+    public async Task<Maybe<int>> ExecuteAsync(string addonId, string targetDirectory, CancellationToken token = default)
     {
         if (string.IsNullOrWhiteSpace(targetDirectory) || !Directory.Exists(targetDirectory))
             return Maybe.None<int>($"Target directory does not exist or is invalid: {targetDirectory}");
@@ -44,7 +44,7 @@ public class PluginInvoker : IPluginInvoker
                 // that the AssemblyLoadContext is unloaded, even if the Addon throws an unhandled exception.
                 try
                 {
-                    return await ExecuteInternalAsync(addonId, targetDirectory, loadedPlugin).ConfigureAwait(false);
+                    return await ExecuteInternalAsync(addonId, targetDirectory, loadedPlugin, token).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -57,13 +57,18 @@ public class PluginInvoker : IPluginInvoker
     /// <summary>
     /// The protected inner execution boundary.
     /// </summary>
-    private async Task<Maybe<int>> ExecuteInternalAsync(string addonId, string targetDirectory, LoadedPlugin loadedPlugin)
+    private async Task<Maybe<int>> ExecuteInternalAsync(string addonId, string targetDirectory, LoadedPlugin loadedPlugin, CancellationToken token)
     {
         // 1. Build the toolbelt for the plugin
         var hostServices = new HostServices(addonId, _loggerFactory);
 
         // 2. Build the snapshot of the world
-        var context = new ActionContext { TargetDirectory = targetDirectory, HostServices = hostServices };
+        var context = new ActionContext
+        {
+            TargetDirectory = targetDirectory,
+            HostServices = hostServices,
+            Token = token
+        };
 
         // 3. Double-wrap the execution. 
         // The SDK demands a Task<Maybe>, but we still wrap it in TryAsync just in case 

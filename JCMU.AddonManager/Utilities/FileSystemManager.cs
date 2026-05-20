@@ -1,6 +1,5 @@
 ﻿using System.Text.Json;
 using JinnDev.JCMU.AddonManager.Models;
-using JinnDev.JCMU.SDK.Models;
 using JinnDev.Utilities.Monad;
 
 namespace JinnDev.JCMU.AddonManager.Utilities;
