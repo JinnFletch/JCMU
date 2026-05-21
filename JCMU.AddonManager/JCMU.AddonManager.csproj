@@ -14,8 +14,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="JinnDev.Utilities.Monad" Version="10.0.6" />
-		<PackageReference Include="JinnDev.JCMU.SDK" Version="1.2.0" />
+		<PackageReference Include="JinnDev.JCMU.SDK" Version="1.2.1" />
 		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.3" />
 	</ItemGroup>
 

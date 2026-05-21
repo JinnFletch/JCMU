@@ -84,8 +84,16 @@ public class PluginLoader : IPluginLoader
         if (dllFiles.Length == 0)
             throw new FileNotFoundException($"No compiled .dll files found in {targetDirectory}.");
 
+        // Cascade heuristics to safely identify the primary DLL among dependencies
         var primaryDll = dllFiles.FirstOrDefault(f => Path.GetFileNameWithoutExtension(f).Equals(addonId, StringComparison.OrdinalIgnoreCase))
-                         ?? dllFiles[0];
+                         // Catch namespaces like JinnDev.JCMU.Addon.GlassdoorParser
+                         ?? dllFiles.FirstOrDefault(f => Path.GetFileNameWithoutExtension(f).EndsWith($".{addonId}", StringComparison.OrdinalIgnoreCase))
+                         // Catch other suffix situations
+                         ?? dllFiles.FirstOrDefault(f => Path.GetFileNameWithoutExtension(f).EndsWith(addonId, StringComparison.OrdinalIgnoreCase))
+                         // Catch prefix situations like GlassdoorParser.Core.dll
+                         ?? dllFiles.FirstOrDefault(f => Path.GetFileNameWithoutExtension(f).Contains(addonId, StringComparison.OrdinalIgnoreCase))
+                         // Desperate fallback
+                         ?? throw new FileNotFoundException($"No .dll files found in {targetDirectory} related to the addon name.");
 
         return primaryDll;
     }
