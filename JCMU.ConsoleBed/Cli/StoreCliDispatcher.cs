@@ -233,11 +233,14 @@ public class StoreCliDispatcher
                 var addonId = manifest?.AddonId ?? new DirectoryInfo(addonDir).Name;
                 var author = manifest?.Author ?? "Unknown";
 
+                // Extract the version (fallback to Unknown if the manifest is somehow corrupted)
+                var version = manifest?.Version ?? "Unknown";
+
                 // Cache ONLY the strict AddonId so index-based commands (update/uninstall) resolve properly
                 results.Add(addonId);
 
-                // Display Author/AddonId cleanly to the user
-                var displayString = $"{author}/{addonId}";
+                // Display Author/AddonId and Version cleanly to the user
+                var displayString = $"{author}/{addonId} [v{version}]";
 
                 var dirInfo = new DirectoryInfo(addonDir);
                 if (dirInfo.LinkTarget != null)

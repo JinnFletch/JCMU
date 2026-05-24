@@ -243,6 +243,6 @@ ModelManifest.xml
 # FAKE - F# Make
 .fake/
 *.git-credentials
-AllCode.txt
+*AllCode.txt
 combine_cs_files.bat
 combine_code_new.bat
