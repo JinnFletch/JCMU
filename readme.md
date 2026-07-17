@@ -103,4 +103,4 @@ If you know basic C# and can write a simple `manifest.json`, you can have a cust
 
 > **Pro Tip:** Use `dev link` to map your project's folder directly into the JCMU engine so you can test code changes instantly without re-installing.
 
-👉 **[Check out the JCMU SDK Documentation to get started!](JCMU.SDK/readme.md)**
+👉 **[Check out the JCMU SDK Documentation to get started!](https://github.com/JinnFletch/JCMU.SDK/blob/main/readme.md)**
